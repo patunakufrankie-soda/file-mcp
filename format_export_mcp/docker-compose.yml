@@ -1,0 +1,18 @@
+services:
+  format-export-mcp:
+    build:
+      context: ..
+      dockerfile: format_export_mcp/Dockerfile
+    image: format-export-mcp:latest
+    container_name: format-export-mcp
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      FORMAT_EXPORT_HOST: 0.0.0.0
+      FORMAT_EXPORT_PORT: 8000
+      FORMAT_EXPORT_STORAGE_DIR: /data/format-export/exports
+      FORMAT_EXPORT_PUBLIC_BASE_URL: /downloads
+    volumes:
+      - /mnt/nfs/format-export/exports:/data/format-export/exports
+
