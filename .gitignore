@@ -32,3 +32,5 @@ format_export_mcp/storage/exports/*
 
 # Logs
 *.log
+
+#

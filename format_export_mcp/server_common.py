@@ -16,12 +16,12 @@ def create_mcp() -> FastMCP:
     @mcp.tool(name="export_document")
     def export_document_tool(title: str, content: str, format: str) -> ExportDocumentResult:
         """
-        Export plain text or generated content to pdf, docx, txt, md, or html.
+        Export plain text or generated content to pdf, docx, doc, xlsx, xls, csv, txt, md, or html.
 
         Args:
             title: Document title and filename stem.
             content: Text content to export.
-            format: Target format: pdf, docx, txt, md, markdown, or html.
+            format: Target format: pdf, docx, doc, xlsx, xls, csv, txt, md, markdown, or html.
         """
         return export_document(title=title, content=content, format=format)
 
