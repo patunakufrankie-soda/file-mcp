@@ -1,0 +1,10 @@
+.git
+.idea
+.venv
+__pycache__/
+*.py[cod]
+.DS_Store
+tests/
+format_export_mcp/storage/exports/*
+!format_export_mcp/storage/exports/.gitkeep
+format-export-mcp-latest.tar

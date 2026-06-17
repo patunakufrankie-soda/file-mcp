@@ -442,13 +442,20 @@ dependencies = [
     { name = "starlette" },
 ]
 
+[package.optional-dependencies]
+dev = [
+    { name = "httpx" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "fastmcp", specifier = ">=2.12.0" },
+    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27.0" },
     { name = "python-docx", specifier = ">=1.1.2" },
     { name = "reportlab", specifier = ">=4.2.5" },
     { name = "starlette", specifier = ">=0.37.2" },
 ]
+provides-extras = ["dev"]
 
 [[package]]
 name = "griffelib"

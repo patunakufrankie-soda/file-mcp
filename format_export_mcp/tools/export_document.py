@@ -5,16 +5,14 @@ from importlib import import_module
 from typing import Callable, Literal, TypedDict
 
 from .csv_generator import generate_csv
-from .doc_generator import generate_doc
 from .html_generator import generate_html
 from .md_generator import generate_md
-from .storage import build_file_url, build_output_path, store_export_file
+from .storage import build_file_url, build_output_path, prune_expired_exports, store_export_file
 from .xlsx_generator import generate_xlsx
-from .xls_generator import generate_xls
 from .txt_generator import generate_txt
 
 
-ExportFormat = Literal["pdf", "docx", "doc", "xlsx", "xls", "csv", "txt", "md", "html"]
+ExportFormat = Literal["pdf", "docx", "xlsx", "csv", "txt", "md", "html"]
 
 
 class ExportDocumentResult(TypedDict):
@@ -35,9 +33,7 @@ def _lazy_generator(module_name: str, function_name: str) -> Callable[[str, str,
 GENERATORS: dict[str, tuple[str, Callable[[str, str, Path], None]]] = {
     "pdf": ("pdf", _lazy_generator("pdf_generator", "generate_pdf")),
     "docx": ("docx", _lazy_generator("docx_generator", "generate_docx")),
-    "doc": ("doc", generate_doc),
     "xlsx": ("xlsx", generate_xlsx),
-    "xls": ("xls", generate_xls),
     "csv": ("csv", generate_csv),
     "txt": ("txt", generate_txt),
     "md": ("md", generate_md),
@@ -50,9 +46,10 @@ def export_document(title: str, content: str, format: str) -> ExportDocumentResu
     """Export text content to pdf, docx, txt, md, or html and return a download URL."""
     normalized_format = (format or "").strip().lower()
     if normalized_format not in GENERATORS:
-        supported = ", ".join(["pdf", "docx", "doc", "xlsx", "xls", "csv", "txt", "md", "html"])
+        supported = ", ".join(["pdf", "docx", "xlsx", "csv", "txt", "md", "html"])
         raise ValueError(f"Unsupported format: {format}. Supported formats: {supported}")
 
+    prune_expired_exports()
     clean_title = (title or "Export").strip() or "Export"
     extension, generator = GENERATORS[normalized_format]
     output_path = build_output_path(clean_title, extension)

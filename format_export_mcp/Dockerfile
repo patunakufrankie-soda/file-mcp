@@ -8,11 +8,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY format_export_mcp/requirements.txt /app/format_export_mcp/requirements.txt
-RUN pip install --no-cache-dir -r /app/format_export_mcp/requirements.txt
+RUN groupadd --system appuser && useradd --system --gid appuser --create-home appuser
 
+COPY pyproject.toml /app/pyproject.toml
 COPY format_export_mcp /app/format_export_mcp
-RUN mkdir -p /app/format_export_mcp/storage/exports
+RUN pip install --no-cache-dir .
+
+RUN mkdir -p /app/format_export_mcp/storage/exports \
+    && chown -R appuser:appuser /app
+
+USER appuser
 
 EXPOSE 8000
 

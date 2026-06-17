@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import secrets
+import time
 import unicodedata
 from pathlib import Path
 from urllib.parse import urljoin
@@ -21,6 +22,14 @@ def get_export_dir() -> Path:
 
 def get_public_base_url() -> str:
     return os.getenv("FORMAT_EXPORT_PUBLIC_BASE_URL", "/downloads").rstrip("/")
+
+
+def get_file_ttl_seconds() -> int:
+    raw_value = os.getenv("FORMAT_EXPORT_FILE_TTL_SECONDS", str(7 * 24 * 60 * 60))
+    try:
+        return max(0, int(raw_value))
+    except ValueError as exc:
+        raise ValueError("FORMAT_EXPORT_FILE_TTL_SECONDS must be an integer") from exc
 
 
 def safe_stem(title: str) -> str:
@@ -47,6 +56,23 @@ def join_public_url(file_name: str, base_url: str | None = None, object_key: str
 
 def build_file_url(file_name: str) -> str:
     return join_public_url(file_name)
+
+
+def prune_expired_exports(now: float | None = None) -> None:
+    ttl_seconds = get_file_ttl_seconds()
+    if ttl_seconds <= 0:
+        return
+
+    cutoff = (now if now is not None else time.time()) - ttl_seconds
+    export_dir = get_export_dir()
+    for candidate in export_dir.iterdir():
+        if not candidate.is_file():
+            continue
+        try:
+            if candidate.stat().st_mtime < cutoff:
+                candidate.unlink()
+        except FileNotFoundError:
+            continue
 
 
 def store_export_file(local_path: Path, file_name: str) -> Path:

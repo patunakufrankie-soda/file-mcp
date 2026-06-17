@@ -8,7 +8,7 @@ Format Export MCP 是一个通用格式导出 MCP Server，用于把文档解析
 
 - MCP 名称：`Format Export MCP`
 - Tool 名称：`export_document`
-- 支持格式：`pdf`、`docx`、`doc`、`xlsx`、`xls`、`csv`、`txt`、`md`、`html`
+- 支持格式：`pdf`、`docx`、`xlsx`、`csv`、`txt`、`md`、`html`
 - 传输方式：`stdio`、`sse`、`streamable_http`
 - 本地存储：`storage/exports/`
 - 下载 URL：`/downloads/{file_name}`
@@ -31,12 +31,11 @@ format_export_mcp/
 │   └── storage.py
 ├── storage/
 │   └── exports/
-├── requirements.txt
 ├── Dockerfile
 └── README.md
 ```
 
-`tools/export_document.py` 是业务入口，三个 `server_*.py` 只负责切换传输协议。后续新增格式或更换存储目录，不需要改传输层代码。
+`tools/export_document.py` 是业务入口，三个 `server_*.py` 只负责切换传输协议。依赖统一维护在根目录 `pyproject.toml`，后续新增格式或更换存储目录，不需要改传输层代码。
 
 ## uv 安装
 
@@ -57,9 +56,7 @@ uv sync
 }
 ```
 
-`format` 可传：`pdf`、`docx`、`doc`、`xlsx`、`xls`、`csv`、`txt`、`md`、`markdown`、`html`。
-
-其中 `doc` 和 `xls` 是面向旧版 Office 的兼容导出，分别对应 Word 兼容 RTF 和 Excel 兼容 XML。
+`format` 可传：`pdf`、`docx`、`xlsx`、`csv`、`txt`、`md`、`markdown`、`html`。
 
 ## Tool 返回
 
@@ -89,6 +86,7 @@ def export_document_tool(title: str, content: str, format: str):
 当前工程还注册了三个 HTTP 辅助路由：
 
 - `GET /health`
+- `GET /ready`
 - `POST /api/export_document`
 - `GET /downloads/{file_name}`
 
@@ -194,7 +192,9 @@ Agent 调用 MCP Tool：
 如果前端希望通过 HTTP JSON 调用辅助路由：
 
 ```ts
-async function exportDocument(format: "pdf" | "docx" | "txt" | "md" | "html") {
+async function exportDocument(
+  format: "pdf" | "docx" | "xlsx" | "csv" | "txt" | "md" | "html"
+) {
   const response = await fetch("/api/export_document", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -218,9 +218,7 @@ async function exportDocument(format: "pdf" | "docx" | "txt" | "md" | "html") {
 const exportOptions = [
   { label: "TXT", format: "txt" },
   { label: "CSV", format: "csv" },
-  { label: "DOC", format: "doc" },
   { label: "DOCX", format: "docx" },
-  { label: "XLS", format: "xls" },
   { label: "XLSX", format: "xlsx" },
   { label: "PDF", format: "pdf" },
   { label: "Markdown", format: "md" },
@@ -249,6 +247,7 @@ docker run --rm -p 8000:8000 \
 ```text
 MCP: http://localhost:8000/mcp/
 Health: http://localhost:8000/health
+Ready: http://localhost:8000/ready
 Downloads: http://localhost:8000/downloads/{file_name}
 ```
 
@@ -313,6 +312,8 @@ docker run -d \
   registry.company.com/platform/format-export-mcp:latest
 ```
 
+注意：容器现在默认以非 root 用户运行，挂载到 `FORMAT_EXPORT_STORAGE_DIR` 的宿主机目录需要对容器内运行用户可写。
+
 ## Nginx 反向代理
 
 参考配置：
@@ -348,6 +349,28 @@ http://format-export-test.company.com/downloads/xxx.pdf
 
 - `FORMAT_EXPORT_STORAGE_DIR`：导出目录，默认 `format_export_mcp/storage/exports`
 - `FORMAT_EXPORT_PUBLIC_BASE_URL`：下载前缀，默认 `/downloads`
+- `FORMAT_EXPORT_FILE_TTL_SECONDS`：导出文件保留时长，默认 `604800` 秒（7 天）
+- `FORMAT_EXPORT_RATE_LIMIT_PER_MINUTE`：`POST /api/export_document` 的单 IP 每分钟请求上限，默认 `20`
+- `/health`：轻量 liveness，只检查进程是否存活
+- `/ready`：readiness，会检查导出目录存在且当前进程可写
+
+## 日志与排障
+
+`POST /api/export_document` 会返回 `X-Request-ID` 响应头。调用方可以传入 `X-Request-ID` 请求头，未传时服务端会自动生成。
+
+导出成功、失败和限流都会输出 JSON 格式日志，包含：
+
+- `event`
+- `request_id`
+- `client_host`
+- `status_code`
+- `duration_ms`
+- `error_code`（失败时）
+- `file_name` 和 `format`（成功时）
+
+## 发布制品管理
+
+源码仓库只保留源码、配置和测试。镜像 tar、压缩包等发布制品不放在仓库根目录，也不纳入 Git 基线；发布物应交给镜像仓库、制品仓库或部署流水线管理。
 
 推荐部署时将 `FORMAT_EXPORT_STORAGE_DIR` 指向挂载好的 NFS 路径，例如：
 
@@ -380,39 +403,21 @@ export FORMAT_EXPORT_PUBLIC_BASE_URL=https://files.company.com/downloads
 - `content` 按段落、Markdown 标题或业务结构切分为多页
 - 会议纪要、周报可以按“议题、结论、待办”映射到不同版式
 
-## 扩展 Excel 导出方案
+## 表格格式说明
 
-新增：
-
-- `tools/xlsx_generator.py`
-- 依赖：`openpyxl`
-- 在 `GENERATORS` 中增加 `"xlsx": ("xlsx", generate_xlsx)`
-
-内容策略：
-
-- 普通文本按行写入第一列
-- 如果业务传入结构化数据，建议扩展输入参数支持 `tables`
-- 周报、知识库问答统计、工艺数据可直接生成多 sheet
-
-## 扩展 CSV 导出方案
-
-新增：
-
-- `tools/csv_generator.py`
-- 使用 Python 标准库 `csv`
-- 在 `GENERATORS` 中增加 `"csv": ("csv", generate_csv)`
-
-内容策略：
-
-- 文本内容按行输出单列 CSV
-- 结构化表格使用二维数组或对象数组
-- 注意 UTF-8 BOM 可配置，便于 Excel 在 Windows 上正确识别中文
+- `xlsx`：当前使用项目内置 XML 打包方式生成单 sheet 文件，适合轻量导出。
+- `csv`：使用 Python 标准库 `csv`，适合简单表格和跨系统交换。
+- 这两类格式当前都把 `content` 视为 CSV 风格文本输入；如果后续要支持更稳定的复杂表格，建议扩展为结构化 `rows` 参数。
 
 ## 设计说明
 
 - 业务逻辑与传输层解耦：`export_document()` 不关心 stdio、SSE 或 HTTP。
 - 文件名使用标题加随机短 token，降低重名覆盖风险。
+- 每次导出前会清理超过 TTL 的历史文件，避免存储目录持续膨胀。
+- HTTP 导出接口会返回请求 ID，并记录结构化成功、失败和限流日志。
 - PDF 使用 `reportlab` 的 CID 字体 `STSong-Light`，适配中文内容。
 - DOCX 使用 `python-docx`，并设置中文字体。
+- 表格导出当前聚焦 `xlsx/csv` 两种常用格式，旧版 `doc/xls` 已移除。
 - 前端可走 MCP Client，也可走 HTTP 辅助路由。
+- HTTP 辅助导出路由默认带单 IP 限流；如需更强保护，建议仍在网关层补鉴权和全局限流。
 - 当前没有鉴权，生产环境建议在平台网关或 FastMCP 鉴权层补充 Bearer Token、租户隔离、文件过期清理和审计日志。

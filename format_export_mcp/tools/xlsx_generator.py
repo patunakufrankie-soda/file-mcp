@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from io import BytesIO
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
+
+from .tabular import parse_delimited_rows
 
 
 def _cell_reference(row_index: int, col_index: int) -> str:
@@ -25,10 +26,9 @@ def _escape_xml(text: str) -> str:
 
 
 def _sheet_xml(content: str) -> str:
-    rows = (content or "").splitlines() or [""]
+    rows = parse_delimited_rows(content)
     xml_rows: list[str] = []
-    for row_index, line in enumerate(rows):
-        cells = line.split(",")
+    for row_index, cells in enumerate(rows):
         xml_cells: list[str] = []
         for col_index, cell in enumerate(cells):
             ref = _cell_reference(row_index, col_index)
@@ -88,4 +88,3 @@ def generate_xlsx(title: str, content: str, output_path: Path) -> None:
         archive.writestr("xl/workbook.xml", workbook_xml)
         archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
         archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
-
