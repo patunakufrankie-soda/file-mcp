@@ -10,9 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse
 
+from .tools.document_convert import ConvertDocumentResult, convert_document
 from .tools.export_document import ExportDocumentResult, export_document
 from .tools.storage import get_export_dir, resolve_export_file
 
@@ -49,6 +52,12 @@ def _get_rate_limit_per_minute() -> int:
         return max(0, int(raw_value))
     except ValueError as exc:
         raise ValueError("FORMAT_EXPORT_RATE_LIMIT_PER_MINUTE must be an integer") from exc
+
+
+def _get_allowed_origins() -> list[str]:
+    raw_value = os.getenv("FORMAT_EXPORT_ALLOWED_ORIGINS", "*")
+    origins = [item.strip() for item in raw_value.split(",") if item.strip()]
+    return origins or ["*"]
 
 
 _EXPORT_RATE_LIMITER = FixedWindowRateLimiter(limit=_get_rate_limit_per_minute(), window_seconds=60)
@@ -109,7 +118,7 @@ def check_storage_readiness() -> tuple[bool, dict[str, Any]]:
         )
 
 
-def _parse_export_payload(payload: Any) -> tuple[str, str, str]:
+def _parse_export_payload(payload: Any) -> tuple[str, str, str, list[str]]:
     if not isinstance(payload, dict):
         raise ValueError("Request body must be a JSON object")
 
@@ -120,23 +129,86 @@ def _parse_export_payload(payload: Any) -> tuple[str, str, str]:
             raise ValueError(f"{field_name} must be a string")
         parsed_values.append(value)
 
+    images = payload.get("images", [])
+    if images is None:
+        images = []
+    if not isinstance(images, list) or any(not isinstance(item, str) for item in images):
+        raise ValueError("images must be a list of strings")
+
+    return tuple(parsed_values + [images])  # type: ignore[return-value]
+
+
+def _parse_convert_payload(payload: Any) -> tuple[str, str, str, str]:
+    if not isinstance(payload, dict):
+        raise ValueError("Request body must be a JSON object")
+
+    parsed_values: list[str] = []
+    for field_name in ("title", "source_format", "target_format", "content"):
+        value = payload.get(field_name, "")
+        if value is None or not isinstance(value, str):
+            raise ValueError(f"{field_name} must be a string")
+        parsed_values.append(value)
+
     return tuple(parsed_values)  # type: ignore[return-value]
+
+
+def create_http_middleware() -> list[Middleware]:
+    allowed_origins = _get_allowed_origins()
+    cors_kwargs: dict[str, Any] = {
+        "allow_methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "X-Request-ID"],
+        "expose_headers": ["X-Request-ID"],
+    }
+    if allowed_origins == ["*"]:
+        cors_kwargs["allow_origin_regex"] = ".*"
+    else:
+        cors_kwargs["allow_origins"] = allowed_origins
+    return [Middleware(CORSMiddleware, **cors_kwargs)]
 
 
 def create_mcp() -> FastMCP:
     mcp = FastMCP("Format Export MCP")
 
     @mcp.tool(name="export_document")
-    def export_document_tool(title: str, content: str, format: str) -> ExportDocumentResult:
+    def export_document_tool(
+        title: str,
+        content: str,
+        format: str,
+        images: list[str] | None = None,
+    ) -> ExportDocumentResult:
         """
-        Export plain text or generated content to pdf, docx, xlsx, csv, txt, md, or html.
+        Export text content, or text plus images, to a document file.
 
         Args:
             title: Document title and filename stem.
             content: Text content to export.
             format: Target format: pdf, docx, xlsx, csv, txt, md, markdown, or html.
+            images: Optional image list. If present, only pdf and docx are supported.
         """
-        return export_document(title=title, content=content, format=format)
+        return export_document(title=title, content=content, format=format, images=images)
+
+    @mcp.tool(name="convert_document")
+    def convert_document_tool(
+        title: str,
+        source_format: str,
+        target_format: str,
+        content: str,
+    ) -> ConvertDocumentResult:
+        """
+        Convert supported text-based document content into another document format.
+
+        Args:
+            title: Output document title and filename stem.
+            source_format: Source content format: markdown, md, text, txt, or csv.
+            target_format: Target format: pdf, docx, or xlsx.
+            content: Source document content as text.
+        """
+        return convert_document(
+            title=title,
+            source_format=source_format,
+            target_format=target_format,
+            content=content,
+        )
 
     @mcp.custom_route("/", methods=["GET"])
     async def index(request: Request) -> HTMLResponse:
@@ -157,6 +229,7 @@ def create_mcp() -> FastMCP:
   <p>MCP endpoint: <code>/mcp/</code></p>
   <p>Health check: <code>/health</code></p>
   <p>Frontend export API: <code>POST /api/export_document</code></p>
+  <p>Frontend convert API: <code>POST /api/convert_document</code></p>
 </body>
 </html>"""
         return HTMLResponse(html)
@@ -196,8 +269,8 @@ def create_mcp() -> FastMCP:
 
         try:
             payload = await request.json()
-            title, content, format_name = _parse_export_payload(payload)
-            result = export_document(title=title, content=content, format=format_name)
+            title, content, format_name, images = _parse_export_payload(payload)
+            result = export_document(title=title, content=content, format=format_name, images=images)
         except Exception as exc:
             status_code, error_code, message = classify_export_error(exc)
             _log_event(
@@ -227,6 +300,74 @@ def create_mcp() -> FastMCP:
             client_host=client_host,
             status_code=200,
             format=format_name,
+            file_name=result["file_name"],
+            duration_ms=_duration_ms(start_time),
+        )
+        return JSONResponse(result, headers={"X-Request-ID": request_id})
+
+    @mcp.custom_route("/api/convert_document", methods=["POST"])
+    async def convert_document_api(request: Request) -> JSONResponse:
+        start_time = time.perf_counter()
+        request_id = _request_id_from(request)
+        client_host = request.client.host if request.client else "unknown"
+        if not _EXPORT_RATE_LIMITER.allow(client_host):
+            _log_event(
+                logging.WARNING,
+                "convert_document.rate_limited",
+                request_id=request_id,
+                client_host=client_host,
+                status_code=429,
+                duration_ms=_duration_ms(start_time),
+            )
+            return JSONResponse(
+                {
+                    "success": False,
+                    "request_id": request_id,
+                    "error": {"code": "rate_limited", "message": "Rate limit exceeded"},
+                },
+                status_code=429,
+                headers={"X-Request-ID": request_id},
+            )
+
+        try:
+            payload = await request.json()
+            title, source_format, target_format, content = _parse_convert_payload(payload)
+            result = convert_document(
+                title=title,
+                source_format=source_format,
+                target_format=target_format,
+                content=content,
+            )
+        except Exception as exc:
+            status_code, error_code, message = classify_export_error(exc)
+            _log_event(
+                logging.ERROR,
+                "convert_document.failed",
+                request_id=request_id,
+                client_host=client_host,
+                status_code=status_code,
+                error_code=error_code,
+                exception_type=type(exc).__name__,
+                duration_ms=_duration_ms(start_time),
+            )
+            return JSONResponse(
+                {
+                    "success": False,
+                    "request_id": request_id,
+                    "error": {"code": error_code, "message": message},
+                },
+                status_code=status_code,
+                headers={"X-Request-ID": request_id},
+            )
+
+        _log_event(
+            logging.INFO,
+            "convert_document.completed",
+            request_id=request_id,
+            client_host=client_host,
+            status_code=200,
+            source_format=source_format,
+            target_format=target_format,
             file_name=result["file_name"],
             duration_ms=_duration_ms(start_time),
         )

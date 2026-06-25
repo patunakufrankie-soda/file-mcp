@@ -1,14 +1,17 @@
 # Format Export MCP
 
-Format Export MCP 是一个通用格式导出 MCP Server，用于把文档解析结果、会议纪要、工艺卡、AI 生成内容、知识库问答结果、周报等内容统一导出为文件。
+Format Export MCP 是一个通用格式导出 MCP Server，用于把文档解析结果、会议纪要、工艺卡、AI 生成内容、知识库问答结果、周报，以及 AI 生成图片统一导出为文件。
 
 它不依赖大模型推理，Agent 和前端都可以调用同一个能力。
 
 ## 能力
 
 - MCP 名称：`Format Export MCP`
-- Tool 名称：`export_document`
+- Tool 名称：`export_document`、`convert_document`
 - 支持格式：`pdf`、`docx`、`xlsx`、`csv`、`txt`、`md`、`html`
+- 图片内容限制：只支持导出到 `pdf` 和 `docx`
+- Markdown 内容在 `pdf`、`docx`、`html` 中会按标题、列表、代码块渲染
+- 文档转换接口当前只支持三类：`markdown/text -> pdf`、`markdown/text -> docx`、`csv -> xlsx`
 - 传输方式：`stdio`、`sse`、`streamable_http`
 - 本地存储：`storage/exports/`
 - 下载 URL：`/downloads/{file_name}`
@@ -52,11 +55,13 @@ uv sync
 {
   "title": "会议纪要",
   "content": "这里是需要导出的内容",
+  "images": [],
   "format": "pdf"
 }
 ```
 
 `format` 可传：`pdf`、`docx`、`xlsx`、`csv`、`txt`、`md`、`markdown`、`html`。
+`images` 可选，支持 `data:image/...;base64,...`、本地图片路径，或者平台知识库返回的 `http(s)://.../api/...` 图片地址；如果是相对的 `/api/...` 地址，需要设置 `FORMAT_EXPORT_IMAGE_SOURCE_BASE_URL` 指向平台基址。只要传了图片，就只能导出到 `pdf` 或 `docx`。
 
 ## Tool 返回
 
@@ -88,6 +93,7 @@ def export_document_tool(title: str, content: str, format: str):
 - `GET /health`
 - `GET /ready`
 - `POST /api/export_document`
+- `POST /api/convert_document`
 - `GET /downloads/{file_name}`
 
 这些路由由 FastMCP 的 `custom_route` 提供，没有使用 FastAPI。
@@ -170,6 +176,7 @@ Agent 调用 MCP Tool：
   "arguments": {
     "title": "会议纪要",
     "content": "一、会议主题：...\n二、会议结论：...",
+    "images": [],
     "format": "pdf"
   }
 }
@@ -182,6 +189,20 @@ Agent 调用 MCP Tool：
   "success": true,
   "file_name": "会议纪要-a1b2c3d4.pdf",
   "file_url": "/downloads/会议纪要-a1b2c3d4.pdf"
+}
+```
+
+文档转换 MCP Tool 调用示例：
+
+```json
+{
+  "tool": "convert_document",
+  "arguments": {
+    "title": "市场分析",
+    "source_format": "markdown",
+    "target_format": "pdf",
+    "content": "# 标题\n\n1.**数字化转型加速**：内容"
+  }
 }
 ```
 
@@ -201,7 +222,30 @@ async function exportDocument(
     body: JSON.stringify({
       title: "会议纪要",
       content: "这里是需要导出的内容",
+      images: [],
       format
+    })
+  });
+
+  const result = await response.json();
+  if (result.success) {
+    window.location.href = result.file_url;
+  }
+}
+```
+
+如果前端要走专门的文档转换接口：
+
+```ts
+async function convertDocument() {
+  const response = await fetch("/api/convert_document", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: "市场分析",
+      source_format: "markdown",
+      target_format: "pdf",
+      content: "# 标题\n\n1.**数字化转型加速**：内容"
     })
   });
 
@@ -224,6 +268,17 @@ const exportOptions = [
   { label: "Markdown", format: "md" },
   { label: "HTML", format: "html" }
 ];
+```
+
+如果要把 AI 生成图片放进文件，可以传：
+
+```json
+{
+  "title": "生成结果",
+  "content": "以下是大模型生成图片：",
+  "images": ["data:image/png;base64,..."],
+  "format": "pdf"
+}
 ```
 
 ## Docker 部署
@@ -387,6 +442,12 @@ export FORMAT_EXPORT_STORAGE_DIR=/mnt/nfs/format-export/exports
 
 ```bash
 export FORMAT_EXPORT_PUBLIC_BASE_URL=https://files.company.com/downloads
+```
+
+如果调用方传入的是相对图片地址，比如 `/api/image/...`，可以再设置：
+
+```bash
+export FORMAT_EXPORT_IMAGE_SOURCE_BASE_URL=https://platform.company.com
 ```
 
 ## 扩展 PPTX 导出方案

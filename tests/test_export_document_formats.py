@@ -1,17 +1,54 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import tempfile
 import time
 import unittest
+import zlib
 from pathlib import Path
 from unittest.mock import patch
 from zipfile import ZipFile
 from zipfile import is_zipfile
 
 import httpx
+
+
+PNG_DATA_URL = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mP8/5+hHgAHggJ/Pv8U/wAAAABJRU5ErkJggg=="
+)
+PNG_BYTES = base64.b64decode(PNG_DATA_URL.split(",", 1)[1])
+
+
+def extract_decoded_pdf_streams(pdf_path: Path) -> list[bytes]:
+    data = pdf_path.read_bytes()
+    streams: list[bytes] = []
+    cursor = 0
+
+    while True:
+        start = data.find(b"stream\n", cursor)
+        if start == -1:
+            break
+        end = data.find(b"endstream", start)
+        if end == -1:
+            break
+
+        raw_stream = data[start + len(b"stream\n"):end].rstrip(b"\r\n")
+        try:
+            decoded_stream = zlib.decompress(base64.a85decode(raw_stream, adobe=True))
+        except Exception:
+            try:
+                decoded_stream = zlib.decompress(raw_stream)
+            except Exception:
+                decoded_stream = raw_stream
+
+        streams.append(decoded_stream)
+        cursor = end + len(b"\nendstream")
+
+    return streams
 
 
 def request_asgi(app, method: str, url: str, **kwargs) -> httpx.Response:
@@ -21,6 +58,21 @@ def request_asgi(app, method: str, url: str, **kwargs) -> httpx.Response:
             return await client.request(method, url, **kwargs)
 
     return asyncio.run(_request())
+
+
+class FakeHTTPResponse:
+    def __init__(self, body: bytes, content_type: str = "image/png") -> None:
+        self._body = body
+        self.headers = {"Content-Type": content_type}
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> "FakeHTTPResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
 
 
 class ExportDocumentFormatTests(unittest.TestCase):
@@ -74,14 +126,301 @@ class ExportDocumentFormatTests(unittest.TestCase):
         self.assertIn('r="A2"', sheet_xml)
         self.assertIn('r="B2"', sheet_xml)
         self.assertNotIn('r="C2"', sheet_xml)
-        self.assertIn("<t>b,c</t>", sheet_xml)
+        self.assertIn("b,c", sheet_xml)
+
+    def test_exports_images_only_to_pdf_and_docx(self) -> None:
+        from format_export_mcp.tools.export_document import export_document
+
+        pdf_result = export_document(title="图片PDF", content="", format="pdf", images=[PNG_DATA_URL])
+        pdf_path = Path(self._tmpdir.name) / pdf_result["file_name"]
+        self.assertTrue(pdf_path.exists())
+        self.assertIn(b"/Image", pdf_path.read_bytes())
+
+        docx_result = export_document(title="图片DOCX", content="", format="docx", images=[PNG_DATA_URL])
+        docx_path = Path(self._tmpdir.name) / docx_result["file_name"]
+        self.assertTrue(docx_path.exists())
+        with ZipFile(docx_path) as archive:
+            media_names = [name for name in archive.namelist() if name.startswith("word/media/")]
+        self.assertEqual(len(media_names), 1)
+
+    def test_remote_image_urls_can_be_embedded_into_pdf(self) -> None:
+        from format_export_mcp.tools.export_document import export_document
+
+        remote_url = "https://kb.example.com/api/file/abc123"
+
+        def fake_urlopen(request, timeout=None):
+            self.assertEqual(request.full_url, remote_url)
+            self.assertIsNotNone(timeout)
+            return FakeHTTPResponse(PNG_BYTES)
+
+        with patch("format_export_mcp.tools.image_sources.urlopen", side_effect=fake_urlopen):
+            result = export_document(title="远程图片PDF", content="", format="pdf", images=[remote_url])
+
+        pdf_path = Path(self._tmpdir.name) / result["file_name"]
+        self.assertTrue(pdf_path.exists())
+        self.assertIn(b"/Image", pdf_path.read_bytes())
+
+    def test_relative_api_image_urls_can_be_embedded_into_docx(self) -> None:
+        from format_export_mcp.tools.export_document import export_document
+
+        content = "导出前文字\n\n![知识库图片](/api/image/abc123)\n\n导出后文字"
+        seen_urls: list[str] = []
+
+        def fake_urlopen(request, timeout=None):
+            seen_urls.append(request.full_url)
+            self.assertIsNotNone(timeout)
+            return FakeHTTPResponse(PNG_BYTES)
+
+        with patch.dict(os.environ, {"FORMAT_EXPORT_IMAGE_SOURCE_BASE_URL": "https://kb.example.com"}):
+            with patch("format_export_mcp.tools.image_sources.urlopen", side_effect=fake_urlopen):
+                result = export_document(title="远程图片DOCX", content=content, format="docx")
+
+        docx_path = Path(self._tmpdir.name) / result["file_name"]
+        self.assertTrue(docx_path.exists())
+        self.assertEqual(seen_urls, ["https://kb.example.com/api/image/abc123"])
+        with ZipFile(docx_path) as archive:
+            media_names = [name for name in archive.namelist() if name.startswith("word/media/")]
+        self.assertEqual(len(media_names), 1)
+
+    def test_markdown_is_rendered_in_docx_exports(self) -> None:
+        from format_export_mcp.tools.export_document import export_document
+
+        markdown = "# Flow Title\n\n- FFmpeg\n- Pandas\n\n```bash\nffmpeg -i input.avi output.mp4\n```"
+        result = export_document(title="Markdown DOCX", content=markdown, format="docx")
+        docx_path = Path(self._tmpdir.name) / result["file_name"]
+
+        with ZipFile(docx_path) as archive:
+            document_xml = archive.read("word/document.xml").decode("utf-8")
+
+        self.assertIn('w:pStyle w:val="Heading1"', document_xml)
+        self.assertIn("Flow Title", document_xml)
+        self.assertNotIn("# Flow Title", document_xml)
+        self.assertIn("FFmpeg", document_xml)
+        self.assertNotIn("- FFmpeg", document_xml)
+        self.assertIn("ffmpeg -i input.avi output.mp4", document_xml)
+
+    def test_markdown_parser_identifies_headings_lists_and_code_blocks(self) -> None:
+        from format_export_mcp.tools.markdown_blocks import parse_markdown_blocks
+
+        blocks = parse_markdown_blocks(
+            "# Flow Title\n\n1. Identify Formats\n2. Select Conversion Method\n\n```bash\nffmpeg -i input.avi output.mp4\n```"
+        )
+
+        self.assertEqual(
+            [(block.kind, block.text, block.level) for block in blocks],
+            [
+                ("heading", "Flow Title", 1),
+                ("ordered_item", "Identify Formats", 1),
+                ("ordered_item", "Select Conversion Method", 2),
+                ("code", "ffmpeg -i input.avi output.mp4", 0),
+            ],
+        )
+
+    def test_markdown_parser_accepts_ordered_items_without_space_after_number(self) -> None:
+        from format_export_mcp.tools.markdown_blocks import parse_markdown_blocks
+
+        blocks = parse_markdown_blocks(
+            "1.**数字化转型加速**：越来越多的企业投入到数字化转型中，以提高效率和市场竞争力。\n"
+            "2.**绿色能源发展**：在全球对可持续发展的重视下，绿色能源行业取得了显著进展。\n"
+            "3.**消费升级**：消费者的购买行为逐渐向高品质和个性化产品转移。"
+        )
+
+        self.assertEqual(
+            [(block.kind, block.level, block.text) for block in blocks],
+            [
+                ("ordered_item", 1, "**数字化转型加速**：越来越多的企业投入到数字化转型中，以提高效率和市场竞争力。"),
+                ("ordered_item", 2, "**绿色能源发展**：在全球对可持续发展的重视下，绿色能源行业取得了显著进展。"),
+                ("ordered_item", 3, "**消费升级**：消费者的购买行为逐渐向高品质和个性化产品转移。"),
+            ],
+        )
+
+    def test_markdown_parser_identifies_standalone_images(self) -> None:
+        from format_export_mcp.tools.markdown_blocks import parse_markdown_blocks
+
+        blocks = parse_markdown_blocks(
+            f"导出前文字\n\n![示意图]({PNG_DATA_URL})\n\n导出后文字"
+        )
+
+        self.assertEqual([block.kind for block in blocks], ["paragraph", "image", "paragraph"])
+        self.assertEqual(blocks[1].text, "示意图")
+        self.assertEqual(blocks[1].image_src, PNG_DATA_URL)
+
+    def test_markdown_images_render_in_docx_at_original_position(self) -> None:
+        from format_export_mcp.tools.export_document import export_document
+
+        content = f"导出前文字\n\n![示意图]({PNG_DATA_URL})\n\n导出后文字"
+        result = export_document(title="图片位置", content=content, format="docx")
+        docx_path = Path(self._tmpdir.name) / result["file_name"]
+
+        with ZipFile(docx_path) as archive:
+            document_xml = archive.read("word/document.xml").decode("utf-8")
+            media_names = [name for name in archive.namelist() if name.startswith("word/media/")]
+
+        self.assertEqual(len(media_names), 1)
+        self.assertIn("导出前文字", document_xml)
+        self.assertIn("导出后文字", document_xml)
+        self.assertIn("w:drawing", document_xml)
+        self.assertLess(document_xml.index("导出前文字"), document_xml.index("w:drawing"))
+        self.assertLess(document_xml.index("w:drawing"), document_xml.index("导出后文字"))
+
+    def test_markdown_images_render_in_pdf(self) -> None:
+        from format_export_mcp.tools.export_document import export_document
+
+        content = f"导出前文字\n\n![示意图]({PNG_DATA_URL})\n\n导出后文字"
+        result = export_document(title="图片位置", content=content, format="pdf")
+        pdf_path = Path(self._tmpdir.name) / result["file_name"]
+
+        self.assertTrue(pdf_path.exists())
+        self.assertIn(b"/Image", pdf_path.read_bytes())
+
+    def test_inline_markdown_is_rendered_cleanly_in_pdf_docx_and_html_exports(self) -> None:
+        from format_export_mcp.tools.export_document import export_document
+
+        content = (
+            "1.**数字化转型加速**：越来越多的企业投入到数字化转型中，以提高效率和市场竞争力。\n"
+            "2.**绿色能源发展**：在全球对可持续发展的重视下，绿色能源行业取得了显著进展。\n"
+            "3.**消费升级**：消费者的购买行为逐渐向高品质和个性化产品转移。"
+        )
+
+        pdf_result = export_document(title="格式测试", content=content, format="pdf")
+        pdf_path = Path(self._tmpdir.name) / pdf_result["file_name"]
+        pdf_streams = extract_decoded_pdf_streams(pdf_path)
+        self.assertTrue(pdf_streams)
+        self.assertFalse(any(b"\x00*\x00*" in stream for stream in pdf_streams))
+
+        docx_result = export_document(title="格式测试", content=content, format="docx")
+        docx_path = Path(self._tmpdir.name) / docx_result["file_name"]
+        with ZipFile(docx_path) as archive:
+            document_xml = archive.read("word/document.xml").decode("utf-8")
+        self.assertNotIn("**", document_xml)
+        self.assertIn("数字化转型加速", document_xml)
+        self.assertIn("w:b", document_xml)
+
+        html_result = export_document(title="格式测试", content=content, format="html")
+        html_path = Path(self._tmpdir.name) / html_result["file_name"]
+        html_text = html_path.read_text(encoding="utf-8")
+        self.assertNotIn("**", html_text)
+        self.assertIn("<strong>数字化转型加速</strong>", html_text)
+        self.assertIn("<ol>", html_text)
+
+    def test_inline_html_styles_and_markdown_tables_survive_common_exports(self) -> None:
+        from format_export_mcp.tools.export_document import export_document
+
+        content = (
+            "答：安全是指没有受到<u>威胁</u>、没有<del>危险</del>、<strong>损失</strong>。\n\n"
+            "| 姓名 | 工号 | 年龄 |\n"
+            "| --- | --- | --- |\n"
+            "| 张三 | 001 | 18 |\n"
+            "| 李四 | 002 | 19 |"
+        )
+
+        pdf_result = export_document(title="样式测试", content=content, format="pdf")
+        pdf_path = Path(self._tmpdir.name) / pdf_result["file_name"]
+        pdf_streams = extract_decoded_pdf_streams(pdf_path)
+        self.assertTrue(pdf_streams)
+        self.assertFalse(any(b"<u>" in stream or b"<del>" in stream or b"<strong>" in stream for stream in pdf_streams))
+
+        docx_result = export_document(title="样式测试", content=content, format="docx")
+        docx_path = Path(self._tmpdir.name) / docx_result["file_name"]
+        with ZipFile(docx_path) as archive:
+            document_xml = archive.read("word/document.xml").decode("utf-8")
+        self.assertIn("w:u", document_xml)
+        self.assertIn("w:strike", document_xml)
+        self.assertIn("w:b", document_xml)
+        self.assertIn("w:tbl", document_xml)
+        self.assertIn("张三", document_xml)
+        self.assertNotIn("| 姓名 |", document_xml)
+
+        html_result = export_document(title="样式测试", content=content, format="html")
+        html_path = Path(self._tmpdir.name) / html_result["file_name"]
+        html_text = html_path.read_text(encoding="utf-8")
+        self.assertIn("<u>威胁</u>", html_text)
+        self.assertIn("<del>危险</del>", html_text)
+        self.assertIn("<strong>损失</strong>", html_text)
+        self.assertIn("<table>", html_text)
+        self.assertIn("<td>张三</td>", html_text)
+        self.assertNotIn("| 姓名 |", html_text)
+
+        xlsx_result = export_document(title="样式测试", content=content, format="xlsx")
+        xlsx_path = Path(self._tmpdir.name) / xlsx_result["file_name"]
+        with ZipFile(xlsx_path) as archive:
+            sheet_xml = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        self.assertIn('r="A1"', sheet_xml)
+        self.assertIn('r="B2"', sheet_xml)
+        self.assertIn("张三", sheet_xml)
+        self.assertIn("李四", sheet_xml)
+        self.assertNotIn("| 姓名 |", sheet_xml)
+
+    def test_convert_document_dispatches_markdown_to_pdf(self) -> None:
+        from format_export_mcp.tools.document_convert import convert_document
+
+        result = convert_document(
+            title="市场分析",
+            source_format="markdown",
+            target_format="pdf",
+            content="# 标题\n\n1.**数字化转型加速**：内容",
+        )
+
+        pdf_path = Path(self._tmpdir.name) / result["file_name"]
+        self.assertTrue(result["success"])
+        self.assertTrue(result["file_name"].endswith(".pdf"))
+        self.assertTrue(pdf_path.exists())
+
+    def test_convert_document_dispatches_csv_to_xlsx(self) -> None:
+        from format_export_mcp.tools.document_convert import convert_document
+
+        result = convert_document(
+            title="人员表",
+            source_format="csv",
+            target_format="xlsx",
+            content="姓名,部门\n张三,研发",
+        )
+
+        xlsx_path = Path(self._tmpdir.name) / result["file_name"]
+        self.assertTrue(result["success"])
+        self.assertTrue(result["file_name"].endswith(".xlsx"))
+        self.assertTrue(is_zipfile(xlsx_path))
+
+    def test_convert_document_rejects_unsupported_conversion_pairs(self) -> None:
+        from format_export_mcp.tools.document_convert import convert_document
+
+        with self.assertRaisesRegex(ValueError, "Unsupported conversion"):
+            convert_document(
+                title="人员表",
+                source_format="csv",
+                target_format="pdf",
+                content="姓名,部门\n张三,研发",
+            )
+
+    def test_rejects_non_document_formats_when_images_are_present(self) -> None:
+        from format_export_mcp.tools.export_document import export_document
+
+        with self.assertRaisesRegex(ValueError, "Image content only supports pdf or docx"):
+            export_document(title="图片", content="", format="txt", images=[PNG_DATA_URL])
+
+    def test_exports_local_image_paths(self) -> None:
+        from format_export_mcp.tools.export_document import export_document
+
+        image_path = Path(self._tmpdir.name) / "sample.png"
+        image_path.write_bytes(base64.b64decode(PNG_DATA_URL.split(",", 1)[1]))
+
+        result = export_document(title="本地图片", content="", format="docx", images=[str(image_path)])
+        docx_path = Path(self._tmpdir.name) / result["file_name"]
+        with ZipFile(docx_path) as archive:
+            media_names = [name for name in archive.namelist() if name.startswith("word/media/")]
+        self.assertEqual(len(media_names), 1)
 
     def test_http_payload_validation_rejects_none_and_non_string_values(self) -> None:
         from format_export_mcp.server_common import _parse_export_payload
 
         self.assertEqual(
             _parse_export_payload({"title": "标题", "content": "内容", "format": "pdf"}),
-            ("标题", "内容", "pdf"),
+            ("标题", "内容", "pdf", []),
+        )
+
+        self.assertEqual(
+            _parse_export_payload({"title": "标题", "content": "内容", "format": "pdf", "images": [PNG_DATA_URL]}),
+            ("标题", "内容", "pdf", [PNG_DATA_URL]),
         )
 
         with self.assertRaisesRegex(ValueError, "title must be a string"):
@@ -89,6 +428,9 @@ class ExportDocumentFormatTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "content must be a string"):
             _parse_export_payload({"title": "标题", "content": 123, "format": "pdf"})
+
+        with self.assertRaisesRegex(ValueError, "images must be a list of strings"):
+            _parse_export_payload({"title": "标题", "content": "内容", "format": "pdf", "images": [123]})
 
         with self.assertRaisesRegex(ValueError, "JSON object"):
             _parse_export_payload(["not", "an", "object"])
@@ -134,7 +476,13 @@ class ExportDocumentFormatTests(unittest.TestCase):
             with patch.object(server_sse.mcp, "run") as run:
                 server_sse.main()
 
-        run.assert_called_once_with(transport="sse", host="0.0.0.0", port=8000)
+        run.assert_called_once()
+        _, kwargs = run.call_args
+        self.assertEqual(kwargs["transport"], "sse")
+        self.assertEqual(kwargs["host"], "0.0.0.0")
+        self.assertEqual(kwargs["port"], 8000)
+        self.assertEqual(len(kwargs["middleware"]), 1)
+        self.assertEqual(kwargs["middleware"][0].cls.__name__, "CORSMiddleware")
 
     def test_classify_export_error_maps_common_runtime_failures(self) -> None:
         from format_export_mcp.server_common import classify_export_error
@@ -152,10 +500,10 @@ class ExportDocumentFormatTests(unittest.TestCase):
         self.assertEqual((status_code, error_code), (500, "internal_error"))
 
     def test_export_document_api_returns_structured_error_for_runtime_failures(self) -> None:
-        from format_export_mcp.server_common import create_mcp
+        from format_export_mcp.server_common import create_http_middleware, create_mcp
 
         mcp = create_mcp()
-        app = mcp.http_app(path="/mcp/")
+        app = mcp.http_app(path="/mcp/", middleware=create_http_middleware())
 
         with patch(
             "format_export_mcp.server_common.export_document",
@@ -166,7 +514,7 @@ class ExportDocumentFormatTests(unittest.TestCase):
                     app,
                     "POST",
                     "/api/export_document",
-                    json={"title": "标题", "content": "内容", "format": "txt"},
+                    json={"title": "标题", "content": "内容", "format": "txt", "images": []},
                     headers={"X-Request-ID": "req-storage-failure"},
                 )
 
@@ -182,19 +530,19 @@ class ExportDocumentFormatTests(unittest.TestCase):
         )
 
     def test_export_document_api_returns_request_id_and_structured_success_log(self) -> None:
-        from format_export_mcp.server_common import create_mcp
+        from format_export_mcp.server_common import create_http_middleware, create_mcp
 
         mcp = create_mcp()
-        app = mcp.http_app(path="/mcp/")
+        app = mcp.http_app(path="/mcp/", middleware=create_http_middleware())
 
         with self.assertLogs("format_export_mcp.server_common", level="INFO") as logs:
-            response = request_asgi(
-                app,
-                "POST",
-                "/api/export_document",
-                json={"title": "标题", "content": "内容", "format": "txt"},
-                headers={"X-Request-ID": "req-success"},
-            )
+                response = request_asgi(
+                    app,
+                    "POST",
+                    "/api/export_document",
+                    json={"title": "标题", "content": "内容", "format": "txt", "images": []},
+                    headers={"X-Request-ID": "req-success"},
+                )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["x-request-id"], "req-success")
@@ -206,6 +554,108 @@ class ExportDocumentFormatTests(unittest.TestCase):
         self.assertEqual(event["format"], "txt")
         self.assertIn("duration_ms", event)
         self.assertIn("file_name", event)
+
+    def test_export_document_api_handles_cors_preflight_requests(self) -> None:
+        from format_export_mcp.server_common import create_http_middleware, create_mcp
+
+        mcp = create_mcp()
+        app = mcp.http_app(path="/mcp/", middleware=create_http_middleware())
+
+        response = request_asgi(
+            app,
+            "OPTIONS",
+            "/api/export_document",
+            headers={
+                "Origin": "http://10.89.6.208:3000",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type,x-request-id",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["access-control-allow-origin"], "http://10.89.6.208:3000")
+        self.assertIn("POST", response.headers["access-control-allow-methods"])
+        self.assertIn("content-type", response.headers["access-control-allow-headers"].lower())
+        self.assertIn("x-request-id", response.headers["access-control-allow-headers"].lower())
+
+    def test_export_document_api_includes_cors_headers_on_post(self) -> None:
+        from format_export_mcp.server_common import create_http_middleware, create_mcp
+
+        mcp = create_mcp()
+        app = mcp.http_app(path="/mcp/", middleware=create_http_middleware())
+
+        response = request_asgi(
+            app,
+            "POST",
+            "/api/export_document",
+            json={"title": "标题", "content": "内容", "format": "txt", "images": []},
+            headers={"Origin": "http://10.89.6.208:3000"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["access-control-allow-origin"], "http://10.89.6.208:3000")
+
+    def test_export_document_api_rejects_images_for_txt(self) -> None:
+        from format_export_mcp.server_common import create_http_middleware, create_mcp
+
+        mcp = create_mcp()
+        app = mcp.http_app(path="/mcp/", middleware=create_http_middleware())
+
+        response = request_asgi(
+            app,
+            "POST",
+            "/api/export_document",
+            json={"title": "标题", "content": "", "format": "txt", "images": [PNG_DATA_URL]},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["error"],
+            {"code": "invalid_request", "message": "Image content only supports pdf or docx"},
+        )
+
+    def test_convert_document_api_accepts_markdown_to_pdf(self) -> None:
+        from format_export_mcp.server_common import create_http_middleware, create_mcp
+
+        mcp = create_mcp()
+        app = mcp.http_app(path="/mcp/", middleware=create_http_middleware())
+
+        response = request_asgi(
+            app,
+            "POST",
+            "/api/convert_document",
+            json={
+                "title": "市场分析",
+                "source_format": "markdown",
+                "target_format": "pdf",
+                "content": "# 标题\n\n1.**数字化转型加速**：内容",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["success"])
+        self.assertTrue(response.json()["file_name"].endswith(".pdf"))
+
+    def test_convert_document_api_rejects_unsupported_pair(self) -> None:
+        from format_export_mcp.server_common import create_http_middleware, create_mcp
+
+        mcp = create_mcp()
+        app = mcp.http_app(path="/mcp/", middleware=create_http_middleware())
+
+        response = request_asgi(
+            app,
+            "POST",
+            "/api/convert_document",
+            json={
+                "title": "表格",
+                "source_format": "csv",
+                "target_format": "pdf",
+                "content": "a,b\n1,2",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
 
     def test_storage_readiness_checks_directory_writability(self) -> None:
         from format_export_mcp.server_common import check_storage_readiness
@@ -229,10 +679,10 @@ class ExportDocumentFormatTests(unittest.TestCase):
         self.assertEqual(details["error"]["code"], "storage_unavailable")
 
     def test_ready_endpoint_returns_503_when_storage_not_ready(self) -> None:
-        from format_export_mcp.server_common import create_mcp
+        from format_export_mcp.server_common import create_http_middleware, create_mcp
 
         mcp = create_mcp()
-        app = mcp.http_app(path="/mcp/")
+        app = mcp.http_app(path="/mcp/", middleware=create_http_middleware())
 
         with patch(
             "format_export_mcp.server_common.check_storage_readiness",

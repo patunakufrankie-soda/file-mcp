@@ -10,6 +10,12 @@ HTTP 辅助导出接口：
 POST /api/export_document
 ```
 
+HTTP 文档转换接口：
+
+```text
+POST /api/convert_document
+```
+
 文件下载接口：
 
 ```text
@@ -38,6 +44,9 @@ pdf, docx, xlsx, csv, txt, md, markdown, html
 - 旧版 `doc` 和 `xls` 不再支持
 - `xlsx` 和 `csv` 当前把 `content` 当作 CSV 风格文本解析
 - 当前不支持上传已有 `pdf/docx/xlsx` 再互转格式
+- 如果导出内容包含图片，则只支持 `pdf` 和 `docx`
+- 如果 `content` 是 Markdown，大模型输出里的标题、列表、代码块在 `pdf/docx/html` 中会按结构渲染
+- 专门的文档转换接口当前只支持：`markdown/text -> pdf`、`markdown/text -> docx`、`csv -> xlsx`
 
 ## 3. 请求参数
 
@@ -45,6 +54,7 @@ pdf, docx, xlsx, csv, txt, md, markdown, html
 {
   "title": "会议纪要",
   "content": "一、会议主题：...\n二、会议结论：...",
+  "images": [],
   "format": "pdf"
 }
 ```
@@ -53,9 +63,11 @@ pdf, docx, xlsx, csv, txt, md, markdown, html
 
 - `title`：文件标题，也会参与生成文件名
 - `content`：导出内容
+- `images`：可选图片列表，支持 `data:image/...;base64,...` 或本地图片路径
 - `format`：目标格式
 
 这三个字段都应传字符串。`null`、数字、对象等非字符串值会返回 `400`。
+`images` 如果传入，必须是字符串数组；只要数组非空，`format` 就只能是 `pdf` 或 `docx`。
 
 ## 4. 成功响应
 
@@ -124,6 +136,7 @@ type ExportResult = ExportSuccess | ExportFailure;
 export async function exportDocument(params: {
   title: string;
   content: string;
+  images?: string[];
   format: ExportFormat;
 }): Promise<ExportSuccess> {
   const requestId = crypto.randomUUID();
@@ -150,6 +163,42 @@ export async function exportDocument(params: {
 }
 ```
 
+如果要走专门的文档转换接口：
+
+```ts
+type ConvertSourceFormat = "markdown" | "md" | "text" | "txt" | "csv";
+type ConvertTargetFormat = "pdf" | "docx" | "xlsx";
+
+export async function convertDocument(params: {
+  title: string;
+  source_format: ConvertSourceFormat;
+  target_format: ConvertTargetFormat;
+  content: string;
+}): Promise<ExportSuccess> {
+  const requestId = crypto.randomUUID();
+
+  const response = await fetch("/api/convert_document", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Request-ID": requestId,
+    },
+    body: JSON.stringify(params),
+  });
+
+  const result = (await response.json()) as ExportResult;
+
+  if (!response.ok || !result.success) {
+    const message = !result.success && result.error
+      ? result.error.message
+      : "转换失败，请稍后重试";
+    throw new Error(message);
+  }
+
+  return result;
+}
+```
+
 ## 7. 触发下载
 
 简单方式：
@@ -158,6 +207,7 @@ export async function exportDocument(params: {
 const result = await exportDocument({
   title: "会议纪要",
   content: "这里是内容",
+  images: [],
   format: "pdf",
 });
 
@@ -210,7 +260,19 @@ const content = [
 await exportDocument({
   title: "人员表",
   content,
+  images: [],
   format: "xlsx",
+});
+```
+
+图片导出示例：
+
+```ts
+await exportDocument({
+  title: "AI 图片结果",
+  content: "以下是本次生成结果",
+  images: ["data:image/png;base64,..."],
+  format: "docx",
 });
 ```
 
@@ -239,11 +301,24 @@ curl -X POST http://127.0.0.1:8000/api/export_document \
   -d '{"title":"前端联调","content":"hello","format":"txt"}'
 ```
 
+文档转换测试：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/convert_document \
+  -H "Content-Type: application/json" \
+  -H "X-Request-ID: frontend-convert-001" \
+  -d '{"title":"市场分析","source_format":"markdown","target_format":"pdf","content":"# 标题\n\n1.**数字化转型加速**：内容"}'
+```
+
 ## 11. 前端需要注意
 
 - 不要传 `doc` 或 `xls`，后端已经移除旧版格式。
 - 不要把 `null`、数字或对象传给 `title/content/format`。
-- 不要上传已有 Office/PDF 文件要求后端互转格式；当前服务只接收 `content` 文本内容并导出文件。
+- 不要上传已有 Office/PDF 文件要求后端互转格式；当前服务支持文本导出，以及把图片嵌入 `pdf/docx`。
+- 不要在 `txt/md/csv/xlsx/html` 导出请求里传图片，后端会直接返回参数错误。
+- 不要把 `/api/convert_document` 理解成文件上传转换，它当前只接受文本内容和格式对。
+- `csv -> pdf`、`pdf -> docx`、`docx -> pdf` 这类转换当前都不支持，会返回 `invalid_request`。
 - 遇到 `429` 时可以提示“导出过于频繁，请稍后再试”。
 - 遇到 `storage_error` 或 `internal_error` 时展示通用失败提示，并把 `request_id` 给后端排查。
 - 如果文件下载 404，通常是文件已过期清理、下载前缀不对，或前端拼接了错误 base URL。
+- 如果前端页面和导出服务跨域部署，后端必须配置 `FORMAT_EXPORT_ALLOWED_ORIGINS`，否则浏览器预检 `OPTIONS` 会失败。

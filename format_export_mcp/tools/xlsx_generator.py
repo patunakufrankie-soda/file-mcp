@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from .markdown_blocks import parse_markdown_inlines
 from .tabular import parse_delimited_rows
 
 
@@ -25,6 +26,44 @@ def _escape_xml(text: str) -> str:
     )
 
 
+def _escape_xml_text(text: str) -> str:
+    return _escape_xml(text).replace("\n", "&#10;")
+
+
+def _run_xml(text: str, styles: frozenset[str]) -> str:
+    properties: list[str] = []
+    if "bold" in styles:
+        properties.append("<b/>")
+    if "italic" in styles:
+        properties.append("<i/>")
+    if "underline" in styles:
+        properties.append('<u val="single"/>')
+    if "strike" in styles:
+        properties.append("<strike/>")
+    if "code" in styles:
+        properties.append('<rFont val="Courier New"/>')
+
+    properties_xml = f"<rPr>{''.join(properties)}</rPr>" if properties else ""
+    return f"<r>{properties_xml}<t xml:space=\"preserve\">{_escape_xml_text(text)}</t></r>"
+
+
+def _inline_string_xml(text: str, force_bold: bool = False) -> str:
+    spans = parse_markdown_inlines(text)
+    if not spans:
+        return "<is><t></t></is>"
+
+    if len(spans) == 1 and not spans[0].styles and not force_bold:
+        return f"<is><t xml:space=\"preserve\">{_escape_xml_text(spans[0].text)}</t></is>"
+
+    runs: list[str] = []
+    for span in spans:
+        styles = set(span.styles)
+        if force_bold:
+            styles.add("bold")
+        runs.append(_run_xml(span.text, frozenset(styles)))
+    return f"<is>{''.join(runs)}</is>"
+
+
 def _sheet_xml(content: str) -> str:
     rows = parse_delimited_rows(content)
     xml_rows: list[str] = []
@@ -32,9 +71,7 @@ def _sheet_xml(content: str) -> str:
         xml_cells: list[str] = []
         for col_index, cell in enumerate(cells):
             ref = _cell_reference(row_index, col_index)
-            xml_cells.append(
-                f'<c r="{ref}" t="inlineStr"><is><t>{_escape_xml(cell)}</t></is></c>'
-            )
+            xml_cells.append(f'<c r="{ref}" t="inlineStr">{_inline_string_xml(cell, force_bold=row_index == 0)}</c>')
         xml_rows.append(f'<row r="{row_index + 1}">{"".join(xml_cells)}</row>')
 
     return (
