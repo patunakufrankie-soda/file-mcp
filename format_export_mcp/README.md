@@ -7,11 +7,12 @@ Format Export MCP 是一个通用格式导出 MCP Server，用于把文档解析
 ## 能力
 
 - MCP 名称：`Format Export MCP`
-- Tool 名称：`export_document`、`convert_document`
-- 支持格式：`pdf`、`docx`、`xlsx`、`csv`、`txt`、`md`、`html`
+- Tool 名称：`export_document`、`convert_file_document`、`get_supported_conversions`
+- 支持导出格式：`pdf`、`docx`、`xlsx`、`csv`、`txt`、`md`、`html`
+- 支持文件输入格式：`txt`、`md`、`pdf`、`docx`
 - 图片内容限制：只支持导出到 `pdf` 和 `docx`
 - Markdown 内容在 `pdf`、`docx`、`html` 中会按标题、列表、代码块渲染
-- 文档转换接口当前只支持三类：`markdown/text -> pdf`、`markdown/text -> docx`、`csv -> xlsx`
+- 文件转换接口当前支持：`txt/md/pdf/docx` 之间按转换矩阵互转，返回下载地址和本地输出路径
 - 传输方式：`stdio`、`sse`、`streamable_http`
 - 本地存储：`storage/exports/`
 - 下载 URL：`/downloads/{file_name}`
@@ -25,7 +26,12 @@ format_export_mcp/
 ├── server_streamable_http.py
 ├── server_common.py
 ├── tools/
+│   ├── command_utils.py
+│   ├── conversion_matrix.py
 │   ├── export_document.py
+│   ├── file_document_convert.py
+│   ├── format_utils.py
+│   ├── input_loader.py
 │   ├── pdf_generator.py
 │   ├── docx_generator.py
 │   ├── txt_generator.py
@@ -88,12 +94,14 @@ def export_document_tool(title: str, content: str, format: str):
     return export_document(title=title, content=content, format=format)
 ```
 
-当前工程还注册了三个 HTTP 辅助路由：
+当前工程还注册了 HTTP 辅助路由：
 
 - `GET /health`
 - `GET /ready`
 - `POST /api/export_document`
-- `POST /api/convert_document`
+- `POST /api/convert_file_document`
+- `GET /api/supported_conversions`
+- `POST /api/get_supported_conversions`
 - `GET /downloads/{file_name}`
 
 这些路由由 FastMCP 的 `custom_route` 提供，没有使用 FastAPI。
@@ -192,16 +200,14 @@ Agent 调用 MCP Tool：
 }
 ```
 
-文档转换 MCP Tool 调用示例：
+文件转换 MCP Tool 调用示例：
 
 ```json
 {
-  "tool": "convert_document",
+  "tool": "convert_file_document",
   "arguments": {
-    "title": "市场分析",
-    "source_format": "markdown",
-    "target_format": "pdf",
-    "content": "# 标题\n\n1.**数字化转型加速**：内容"
+    "input_uri": "/tmp/sample.pdf",
+    "target_format": "docx"
   }
 }
 ```
@@ -234,26 +240,33 @@ async function exportDocument(
 }
 ```
 
-如果前端要走专门的文档转换接口：
+如果前端要走文件转换接口：
 
 ```ts
-async function convertDocument() {
-  const response = await fetch("/api/convert_document", {
+async function convertFileDocument() {
+  const response = await fetch("/api/convert_file_document", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      title: "市场分析",
-      source_format: "markdown",
-      target_format: "pdf",
-      content: "# 标题\n\n1.**数字化转型加速**：内容"
+      input_uri: "/tmp/sample.txt",
+      target_format: "md",
+      mode: "normal"
     })
   });
 
   const result = await response.json();
   if (result.success) {
-    window.location.href = result.file_url;
+    window.location.href = result.output_url;
   }
 }
+```
+
+支持矩阵也可以直接拉取：
+
+```ts
+const response = await fetch("/api/supported_conversions");
+const result = await response.json();
+console.log(result.formats, result.conversions, result.modes);
 ```
 
 页面菜单可以统一映射：
@@ -338,6 +351,16 @@ curl http://127.0.0.1:8000/
 
 如果测试服务器前面要挂 Nginx，可参考 `format_export_mcp/nginx.format-export.conf`，将外部域名转到本机 `8000` 端口。
 
+## 测试
+
+推荐直接使用项目环境运行：
+
+```bash
+uv run python -m unittest tests.test_export_document_formats
+```
+
+说明：系统自带 `python3` 可能没有安装项目测试依赖，直接运行 `python3 -m unittest` 或 `python3 -m pytest` 不一定可用，优先使用 `uv run`。
+
 ## 镜像推送与拉取
 
 构建镜像：
@@ -363,6 +386,7 @@ docker run -d \
   -e FORMAT_EXPORT_HOST=0.0.0.0 \
   -e FORMAT_EXPORT_PORT=8000 \
   -e FORMAT_EXPORT_STORAGE_DIR=/data/format-export/exports \
+  -e FILE_SERVER_BASE_URL=https://platform.company.com \
   -v /mnt/nfs/format-export/exports:/data/format-export/exports \
   registry.company.com/platform/format-export-mcp:latest
 ```
@@ -406,6 +430,7 @@ http://format-export-test.company.com/downloads/xxx.pdf
 - `FORMAT_EXPORT_PUBLIC_BASE_URL`：下载前缀，默认 `/downloads`
 - `FORMAT_EXPORT_FILE_TTL_SECONDS`：导出文件保留时长，默认 `604800` 秒（7 天）
 - `FORMAT_EXPORT_RATE_LIMIT_PER_MINUTE`：`POST /api/export_document` 的单 IP 每分钟请求上限，默认 `20`
+- `FILE_SERVER_BASE_URL`：当 `convert_file_document` 接收到 `/api/file/...` 这种相对 `input_uri` 时，用来拼接完整文件地址；例如 `https://platform.company.com`
 - `/health`：轻量 liveness，只检查进程是否存活
 - `/ready`：readiness，会检查导出目录存在且当前进程可写
 
@@ -442,6 +467,12 @@ export FORMAT_EXPORT_STORAGE_DIR=/mnt/nfs/format-export/exports
 
 ```bash
 export FORMAT_EXPORT_PUBLIC_BASE_URL=https://files.company.com/downloads
+```
+
+如果调用方传入的是相对文件地址，比如 `/api/file/abc123`，还需要设置：
+
+```bash
+export FILE_SERVER_BASE_URL=https://platform.company.com
 ```
 
 如果调用方传入的是相对图片地址，比如 `/api/image/...`，可以再设置：

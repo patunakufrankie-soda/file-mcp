@@ -1,18 +1,39 @@
 services:
   format-export-mcp:
-    build:
-      context: ..
-      dockerfile: format_export_mcp/Dockerfile
     image: format-export-mcp:latest
     container_name: format-export-mcp
     restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
+      # 服务自身配置
       FORMAT_EXPORT_HOST: 0.0.0.0
       FORMAT_EXPORT_PORT: 8000
       FORMAT_EXPORT_STORAGE_DIR: /data/format-export/exports
       FORMAT_EXPORT_PUBLIC_BASE_URL: /downloads
+      FILE_SERVER_BASE_URL: https://platform.example.com
+
+      # Nacos 开关
+      NACOS_ENABLED: "true"
+      NACOS_ENABLE_CONFIG: "true"
+      NACOS_ENABLE_DISCOVERY: "true"
+      NACOS_ENABLE_HOT_RELOAD: "true"
+
+      # Nacos 连接配置
+      NACOS_SERVER_ADDRESSES: "host.docker.internal:8848"
+      NACOS_NAMESPACE: "public"
+      NACOS_USERNAME: "nacos"
+      NACOS_PASSWORD: "36502607"
+
+      # Nacos 配置中心
+      NACOS_DATA_ID: "format-export-mcp.yaml"
+      NACOS_GROUP: "DEFAULT_GROUP"
+
+      # Nacos 服务注册
+      NACOS_SERVICE_NAME: "format-export-mcp"
+      NACOS_SERVICE_IP: "host.docker.internal"
+      NACOS_SERVICE_PORT: "8000"
+      NACOS_CLUSTER_NAME: "DEFAULT"
+
     volumes:
       - /mnt/nfs/format-export/exports:/data/format-export/exports
-

@@ -7,7 +7,7 @@ import secrets
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from fastmcp import FastMCP
 from starlette.middleware import Middleware
@@ -15,9 +15,14 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse
 
-from .tools.document_convert import ConvertDocumentResult, convert_document
-from .tools.export_document import ExportDocumentResult, export_document
-from .tools.storage import get_export_dir, resolve_export_file
+from .conversion.conversion_matrix import (
+    SupportedConversionsResult,
+    get_supported_conversions,
+)
+from .export.service import ExportDocumentResult, export_document
+from .conversion.file_document_convert import FileConvertResult, convert_file_document
+from .utils.format_utils import ConversionError, status_code_for_error_type
+from .storage.manager import get_export_dir, resolve_export_file
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +56,9 @@ def _get_rate_limit_per_minute() -> int:
     try:
         return max(0, int(raw_value))
     except ValueError as exc:
-        raise ValueError("FORMAT_EXPORT_RATE_LIMIT_PER_MINUTE must be an integer") from exc
+        raise ValueError(
+            "FORMAT_EXPORT_RATE_LIMIT_PER_MINUTE must be an integer"
+        ) from exc
 
 
 def _get_allowed_origins() -> list[str]:
@@ -60,7 +67,9 @@ def _get_allowed_origins() -> list[str]:
     return origins or ["*"]
 
 
-_EXPORT_RATE_LIMITER = FixedWindowRateLimiter(limit=_get_rate_limit_per_minute(), window_seconds=60)
+_EXPORT_RATE_LIMITER = FixedWindowRateLimiter(
+    limit=_get_rate_limit_per_minute(), window_seconds=60
+)
 
 
 def _request_id_from(request: Request) -> str:
@@ -78,6 +87,8 @@ def _log_event(level: int, event: str, **fields: Any) -> None:
 
 
 def classify_export_error(exc: Exception) -> tuple[int, str, str]:
+    if isinstance(exc, ConversionError):
+        return status_code_for_error_type(exc.error_type), exc.error_type, exc.message
     if isinstance(exc, ValueError):
         return 400, "invalid_request", str(exc)
     if isinstance(exc, PermissionError):
@@ -132,24 +143,32 @@ def _parse_export_payload(payload: Any) -> tuple[str, str, str, list[str]]:
     images = payload.get("images", [])
     if images is None:
         images = []
-    if not isinstance(images, list) or any(not isinstance(item, str) for item in images):
+    if not isinstance(images, list) or any(
+        not isinstance(item, str) for item in images
+    ):
         raise ValueError("images must be a list of strings")
 
     return tuple(parsed_values + [images])  # type: ignore[return-value]
 
 
-def _parse_convert_payload(payload: Any) -> tuple[str, str, str, str]:
+def _parse_convert_file_payload(payload: Any) -> tuple[str, str]:
     if not isinstance(payload, dict):
         raise ValueError("Request body must be a JSON object")
 
-    parsed_values: list[str] = []
-    for field_name in ("title", "source_format", "target_format", "content"):
-        value = payload.get(field_name, "")
-        if value is None or not isinstance(value, str):
-            raise ValueError(f"{field_name} must be a string")
-        parsed_values.append(value)
+    input_uri = payload.get("input_uri", "")
+    target_format = payload.get("target_format", "")
 
-    return tuple(parsed_values)  # type: ignore[return-value]
+    if not isinstance(input_uri, str):
+        raise ValueError("input_uri must be a string")
+    if not isinstance(target_format, str):
+        raise ValueError("target_format must be a string")
+    return input_uri, target_format
+
+
+def _http_result_with_request_id(
+    result: Mapping[str, Any], request_id: str
+) -> dict[str, Any]:
+    return {**result, "request_id": request_id}
 
 
 def create_http_middleware() -> list[Middleware]:
@@ -185,30 +204,28 @@ def create_mcp() -> FastMCP:
             format: Target format: pdf, docx, xlsx, csv, txt, md, markdown, or html.
             images: Optional image list. If present, only pdf and docx are supported.
         """
-        return export_document(title=title, content=content, format=format, images=images)
+        return export_document(
+            title=title, content=content, format=format, images=images
+        )
 
-    @mcp.tool(name="convert_document")
-    def convert_document_tool(
-        title: str,
-        source_format: str,
+    @mcp.tool(name="convert_file_document")
+    def convert_file_document_tool(
+        input_uri: str,
         target_format: str,
-        content: str,
-    ) -> ConvertDocumentResult:
+    ) -> FileConvertResult:
         """
-        Convert supported text-based document content into another document format.
+        Convert a local file path or HTTP/HTTPS file URL into another supported document format.
 
         Args:
-            title: Output document title and filename stem.
-            source_format: Source content format: markdown, md, text, txt, or csv.
-            target_format: Target format: pdf, docx, or xlsx.
-            content: Source document content as text.
+            input_uri: Local file path or remote file URL.
+            target_format: Target format: txt, md, pdf, or docx.
         """
-        return convert_document(
-            title=title,
-            source_format=source_format,
-            target_format=target_format,
-            content=content,
-        )
+        return convert_file_document(input_uri=input_uri, target_format=target_format)
+
+    @mcp.tool(name="get_supported_conversions")
+    def get_supported_conversions_tool() -> SupportedConversionsResult:
+        """Return the supported file conversion matrix."""
+        return get_supported_conversions()
 
     @mcp.custom_route("/", methods=["GET"])
     async def index(request: Request) -> HTMLResponse:
@@ -229,7 +246,8 @@ def create_mcp() -> FastMCP:
   <p>MCP endpoint: <code>/mcp/</code></p>
   <p>Health check: <code>/health</code></p>
   <p>Frontend export API: <code>POST /api/export_document</code></p>
-  <p>Frontend convert API: <code>POST /api/convert_document</code></p>
+  <p>Frontend file convert API: <code>POST /api/convert_file_document</code></p>
+  <p>Supported conversions API: <code>GET /api/supported_conversions</code></p>
 </body>
 </html>"""
         return HTMLResponse(html)
@@ -270,7 +288,9 @@ def create_mcp() -> FastMCP:
         try:
             payload = await request.json()
             title, content, format_name, images = _parse_export_payload(payload)
-            result = export_document(title=title, content=content, format=format_name, images=images)
+            result = export_document(
+                title=title, content=content, format=format_name, images=images
+            )
         except Exception as exc:
             status_code, error_code, message = classify_export_error(exc)
             _log_event(
@@ -305,15 +325,15 @@ def create_mcp() -> FastMCP:
         )
         return JSONResponse(result, headers={"X-Request-ID": request_id})
 
-    @mcp.custom_route("/api/convert_document", methods=["POST"])
-    async def convert_document_api(request: Request) -> JSONResponse:
+    @mcp.custom_route("/api/convert_file_document", methods=["POST"])
+    async def convert_file_document_api(request: Request) -> JSONResponse:
         start_time = time.perf_counter()
         request_id = _request_id_from(request)
         client_host = request.client.host if request.client else "unknown"
         if not _EXPORT_RATE_LIMITER.allow(client_host):
             _log_event(
                 logging.WARNING,
-                "convert_document.rate_limited",
+                "convert_file_document.rate_limited",
                 request_id=request_id,
                 client_host=client_host,
                 status_code=429,
@@ -331,18 +351,15 @@ def create_mcp() -> FastMCP:
 
         try:
             payload = await request.json()
-            title, source_format, target_format, content = _parse_convert_payload(payload)
-            result = convert_document(
-                title=title,
-                source_format=source_format,
-                target_format=target_format,
-                content=content,
+            input_uri, target_format = _parse_convert_file_payload(payload)
+            result = convert_file_document(
+                input_uri=input_uri, target_format=target_format
             )
         except Exception as exc:
             status_code, error_code, message = classify_export_error(exc)
             _log_event(
                 logging.ERROR,
-                "convert_document.failed",
+                "convert_file_document.failed",
                 request_id=request_id,
                 client_host=client_host,
                 status_code=status_code,
@@ -360,18 +377,56 @@ def create_mcp() -> FastMCP:
                 headers={"X-Request-ID": request_id},
             )
 
+        if not result.get("success", False):
+            error_type = str(result.get("error_type", "conversion_failed"))
+            status_code = status_code_for_error_type(error_type)
+            log_level = logging.WARNING if status_code < 500 else logging.ERROR
+            _log_event(
+                log_level,
+                "convert_file_document.failed",
+                request_id=request_id,
+                client_host=client_host,
+                status_code=status_code,
+                error_code=error_type,
+                duration_ms=_duration_ms(start_time),
+            )
+            return JSONResponse(
+                _http_result_with_request_id(result, request_id),
+                status_code=status_code,
+                headers={"X-Request-ID": request_id},
+            )
+
         _log_event(
             logging.INFO,
-            "convert_document.completed",
+            "convert_file_document.completed",
             request_id=request_id,
             client_host=client_host,
             status_code=200,
-            source_format=source_format,
-            target_format=target_format,
-            file_name=result["file_name"],
+            source_format=result.get("source_format"),
+            target_format=result.get("target_format"),
+            output_path=result.get("output_path"),
             duration_ms=_duration_ms(start_time),
         )
-        return JSONResponse(result, headers={"X-Request-ID": request_id})
+        return JSONResponse(
+            _http_result_with_request_id(result, request_id),
+            headers={"X-Request-ID": request_id},
+        )
+
+    @mcp.custom_route("/api/supported_conversions", methods=["GET"])
+    async def supported_conversions_api(request: Request) -> JSONResponse:
+        request_id = _request_id_from(request)
+        return JSONResponse(
+            _http_result_with_request_id(get_supported_conversions(), request_id),
+            headers={"X-Request-ID": request_id},
+        )
+
+    @mcp.custom_route("/api/get_supported_conversions", methods=["POST"])
+    async def supported_conversions_post_api(request: Request) -> JSONResponse:
+        request_id = _request_id_from(request)
+        return JSONResponse(
+            _http_result_with_request_id(get_supported_conversions(), request_id),
+            headers={"X-Request-ID": request_id},
+        )
 
     @mcp.custom_route("/downloads/{file_name}", methods=["GET"])
     async def download_file(request: Request) -> FileResponse | JSONResponse:
@@ -379,10 +434,14 @@ def create_mcp() -> FastMCP:
         try:
             file_path = resolve_export_file(file_name)
         except ValueError as exc:
-            return JSONResponse({"success": False, "message": str(exc)}, status_code=400)
+            return JSONResponse(
+                {"success": False, "message": str(exc)}, status_code=400
+            )
 
         if not Path(file_path).exists():
-            return JSONResponse({"success": False, "message": "File not found"}, status_code=404)
+            return JSONResponse(
+                {"success": False, "message": "File not found"}, status_code=404
+            )
         return FileResponse(file_path, filename=file_path.name)
 
     return mcp

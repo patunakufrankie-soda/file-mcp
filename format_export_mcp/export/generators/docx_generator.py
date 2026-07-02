@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .image_sources import load_image_assets
-from .markdown_blocks import parse_markdown_blocks, parse_markdown_inlines
+from ...utils.image_sources import load_image_assets
+from ...utils.markdown_blocks import parse_markdown_blocks, parse_markdown_inlines
 
 
-def generate_docx(title: str, content: str, output_path: Path, images: list[str] | None = None) -> None:
+def generate_docx(
+    title: str, content: str, output_path: Path, images: list[str] | None = None
+) -> None:
     from docx import Document
     from docx.oxml.ns import qn
     from docx.shared import Mm, Pt
@@ -15,7 +17,9 @@ def generate_docx(title: str, content: str, output_path: Path, images: list[str]
         run.font.name = font_name
         run._element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
 
-    def _add_inline_runs(paragraph, text: str, font_name: str = "Microsoft YaHei", font_size: int = 11) -> None:
+    def _add_inline_runs(
+        paragraph, text: str, font_name: str = "Microsoft YaHei", font_size: int = 11
+    ) -> None:
         for span in parse_markdown_inlines(text):
             run = paragraph.add_run(span.text)
             if "bold" in span.styles:
@@ -50,7 +54,9 @@ def generate_docx(title: str, content: str, output_path: Path, images: list[str]
 
         if block.kind == "heading":
             paragraph = document.add_heading(level=min(block.level, 4))
-            _add_inline_runs(paragraph, block.text, font_size=max(12, 20 - (block.level * 2)))
+            _add_inline_runs(
+                paragraph, block.text, font_size=max(12, 20 - (block.level * 2))
+            )
             continue
 
         if block.kind == "bullet_item":
@@ -76,7 +82,9 @@ def generate_docx(title: str, content: str, output_path: Path, images: list[str]
             continue
 
         if block.kind == "table" and block.rows:
-            table = document.add_table(rows=len(block.rows), cols=max(len(row) for row in block.rows))
+            table = document.add_table(
+                rows=len(block.rows), cols=max(len(row) for row in block.rows)
+            )
             table.style = "Table Grid"
             for row_index, row in enumerate(block.rows):
                 for col_index, cell_text in enumerate(row):

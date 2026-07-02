@@ -1,0 +1,45 @@
+# Nacos 配置示例
+# 将此文件上传到 Nacos 配置中心
+# Data ID: format-export-mcp.yaml
+# Group: DEFAULT_GROUP
+
+# 文件服务器配置
+file_server:
+  # 公司平台文件服务器基础地址
+  base_url: "http://10.89.12.28:3000/"
+  # 或者多个环境
+  # base_url: "http://192.168.1.100:9000"
+
+# 转换引擎配置
+conversion:
+  # LibreOffice 配置
+  libreoffice:
+    enabled: true
+    timeout: 60  # 转换超时时间（秒）
+    
+  # PDF 引擎配置
+  pdf:
+    enabled: true
+    max_pages: 500  # 最大页数限制
+    ocr_enabled: false  # 是否启用 OCR
+    
+  # Markdown 引擎配置
+  markdown:
+    enabled: true
+    
+# 存储配置
+storage:
+  export_dir: "/tmp/format_export_mcp/exports"  # 导出文件目录
+  temp_dir: "/tmp/format_export_mcp/temp"  # 临时文件目录
+  ttl: 3600  # 文件过期时间（秒）
+  max_file_size: 104857600  # 最大文件大小（100MB）
+
+# 服务配置
+service:
+  max_concurrent_conversions: 5  # 最大并发转换数
+  enable_metrics: true  # 是否启用指标统计
+  
+# 日志配置
+logging:
+  level: "INFO"  # DEBUG/INFO/WARNING/ERROR
+  format: "json"  # text/json

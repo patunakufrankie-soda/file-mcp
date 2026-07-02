@@ -10,10 +10,17 @@ HTTP 辅助导出接口：
 POST /api/export_document
 ```
 
-HTTP 文档转换接口：
+HTTP 文件转换接口：
 
 ```text
-POST /api/convert_document
+POST /api/convert_file_document
+```
+
+支持矩阵查询接口：
+
+```text
+GET /api/supported_conversions
+POST /api/get_supported_conversions
 ```
 
 文件下载接口：
@@ -43,10 +50,10 @@ pdf, docx, xlsx, csv, txt, md, markdown, html
 - `markdown` 会按 `md` 导出，最终文件扩展名是 `.md`
 - 旧版 `doc` 和 `xls` 不再支持
 - `xlsx` 和 `csv` 当前把 `content` 当作 CSV 风格文本解析
-- 当前不支持上传已有 `pdf/docx/xlsx` 再互转格式
+- 现在支持把已有 `txt/md/pdf/docx` 文件作为输入，再转换成受支持的目标格式
 - 如果导出内容包含图片，则只支持 `pdf` 和 `docx`
 - 如果 `content` 是 Markdown，大模型输出里的标题、列表、代码块在 `pdf/docx/html` 中会按结构渲染
-- 专门的文档转换接口当前只支持：`markdown/text -> pdf`、`markdown/text -> docx`、`csv -> xlsx`
+- 文件转换接口支持本地路径和 `http(s)` URL，当前输入格式限定为 `txt`、`md`、`pdf`、`docx`
 
 ## 3. 请求参数
 
@@ -163,21 +170,29 @@ export async function exportDocument(params: {
 }
 ```
 
-如果要走专门的文档转换接口：
+如果要走文件转换接口：
 
 ```ts
-type ConvertSourceFormat = "markdown" | "md" | "text" | "txt" | "csv";
-type ConvertTargetFormat = "pdf" | "docx" | "xlsx";
+type FileConvertTargetFormat = "txt" | "md" | "pdf" | "docx";
 
-export async function convertDocument(params: {
-  title: string;
-  source_format: ConvertSourceFormat;
-  target_format: ConvertTargetFormat;
-  content: string;
-}): Promise<ExportSuccess> {
+type FileConvertSuccess = {
+  success: true;
+  input_uri: string;
+  output_path: string;
+  output_url: string;
+  source_format: "txt" | "md" | "pdf" | "docx";
+  target_format: FileConvertTargetFormat;
+  message: string;
+  request_id?: string;
+};
+
+export async function convertFileDocument(params: {
+  input_uri: string;
+  target_format: FileConvertTargetFormat;
+}): Promise<FileConvertSuccess> {
   const requestId = crypto.randomUUID();
 
-  const response = await fetch("/api/convert_document", {
+  const response = await fetch("/api/convert_file_document", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -186,12 +201,12 @@ export async function convertDocument(params: {
     body: JSON.stringify(params),
   });
 
-  const result = (await response.json()) as ExportResult;
+  const result = (await response.json()) as ExportResult | FileConvertSuccess;
 
   if (!response.ok || !result.success) {
-    const message = !result.success && result.error
+    const message = !result.success && "error" in result && result.error
       ? result.error.message
-      : "转换失败，请稍后重试";
+      : "文件转换失败，请稍后重试";
     throw new Error(message);
   }
 
@@ -301,23 +316,30 @@ curl -X POST http://127.0.0.1:8000/api/export_document \
   -d '{"title":"前端联调","content":"hello","format":"txt"}'
 ```
 
-文档转换测试：
+文件转换测试：
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/convert_document \
+curl -X POST http://127.0.0.1:8000/api/convert_file_document \
   -H "Content-Type: application/json" \
-  -H "X-Request-ID: frontend-convert-001" \
-  -d '{"title":"市场分析","source_format":"markdown","target_format":"pdf","content":"# 标题\n\n1.**数字化转型加速**：内容"}'
+  -H "X-Request-ID: frontend-file-convert-001" \
+  -d '{"input_uri":"/tmp/sample.txt","target_format":"md","mode":"normal"}'
+```
+
+支持矩阵测试：
+
+```bash
+curl http://127.0.0.1:8000/api/supported_conversions
 ```
 
 ## 11. 前端需要注意
 
 - 不要传 `doc` 或 `xls`，后端已经移除旧版格式。
 - 不要把 `null`、数字或对象传给 `title/content/format`。
-- 不要上传已有 Office/PDF 文件要求后端互转格式；当前服务支持文本导出，以及把图片嵌入 `pdf/docx`。
+- `convert_file_document` 的 `input_uri` 必须传字符串，且只支持本地路径或 `http(s)` 地址。
+- 如果前端传的是 `/api/file/...` 这种相对路径，后端部署时必须配置 `FILE_SERVER_BASE_URL`，服务端才会自动补全成完整 URL。
+- 如果传远程 URL，服务端会先下载到临时目录，再做转换或提取，超大文件或下载失败会直接报错。
 - 不要在 `txt/md/csv/xlsx/html` 导出请求里传图片，后端会直接返回参数错误。
-- 不要把 `/api/convert_document` 理解成文件上传转换，它当前只接受文本内容和格式对。
-- `csv -> pdf`、`pdf -> docx`、`docx -> pdf` 这类转换当前都不支持，会返回 `invalid_request`。
+- 文件转换支持范围应以前端调用 `/api/supported_conversions` 返回的矩阵为准，不要手写假设。
 - 遇到 `429` 时可以提示“导出过于频繁，请稍后再试”。
 - 遇到 `storage_error` 或 `internal_error` 时展示通用失败提示，并把 `request_id` 给后端排查。
 - 如果文件下载 404，通常是文件已过期清理、下载前缀不对，或前端拼接了错误 base URL。

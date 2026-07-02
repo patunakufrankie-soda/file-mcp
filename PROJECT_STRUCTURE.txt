@@ -1,0 +1,95 @@
+# Format Export MCP - 项目结构总览
+
+## 核心目录结构
+
+format_export_mcp/
+│
+├── mcp/                                    # MCP 工具层
+│   ├── tools.py                           # 三个 MCP tool 定义
+│   └── __init__.py
+│
+├── export/                                 # Format Export 功能（MD → 其他格式）
+│   ├── service.py                         # 导出服务编排
+│   ├── generators/                        # 格式生成器
+│   │   ├── pdf_generator.py              # MD → PDF
+│   │   ├── docx_generator.py             # MD → DOCX
+│   │   ├── xlsx_generator.py             # MD → XLSX
+│   │   ├── csv_generator.py              # MD → CSV
+│   │   ├── txt_generator.py              # MD → TXT
+│   │   ├── html_generator.py             # MD → HTML
+│   │   └── md_generator.py               # MD → MD
+│   └── __init__.py
+│
+├── conversion/                             # Document Conversion 功能（文档互转）
+│   ├── file_document_convert.py           # 当前实现（待重构）
+│   ├── conversion_matrix.py               # 转换矩阵
+│   ├── router.py                          # ✅ 转换路由器（29 条路由）
+│   │
+│   ├── services/                          # 服务层
+│   │   ├── conversion_service.py          # ✅ 转换编排服务
+│   │   ├── format_detector.py             # ✅ 格式检测
+│   │   └── __init__.py
+│   │
+│   ├── engines/                           # 转换引擎层
+│   │   ├── base.py                        # ✅ 引擎基类
+│   │   ├── pdf_engine.py                  # ✅ PyMuPDF 引擎
+│   │   ├── libreoffice_engine.py          # ✅ LibreOffice 引擎
+│   │   ├── markdown_engine.py             # ✅ Markdown 引擎
+│   │   ├── ocr_engine.py                  # ⏳ OCR 引擎（待实现）
+│   │   └── __init__.py
+│   │
+│   ├── ir/                                # 中间表示层
+│   │   ├── document_ir.py                 # ✅ 语义层 IR
+│   │   ├── layout_ir.py                   # ✅ 版式层 IR（预留）
+│   │   └── __init__.py
+│   └── __init__.py
+│
+├── storage/                                # 存储管理层
+│   ├── manager.py                         # 文件存储管理
+│   ├── exports/                           # 导出文件目录
+│   └── __init__.py
+│
+├── utils/                                  # 公共工具
+│   ├── format_utils.py                    # 格式工具
+│   ├── command_utils.py                   # 命令行工具
+│   ├── image_sources.py                   # 图片加载
+│   ├── markdown_blocks.py                 # Markdown 解析
+│   ├── tabular.py                         # 表格解析
+│   ├── input_loader.py                    # 输入加载
+│   └── __init__.py
+│
+├── server_common.py                        # MCP 服务器公共定义
+├── server_stdio.py                         # stdio 协议服务器
+├── server_sse.py                           # SSE 协议服务器
+├── server_streamable_http.py               # HTTP 协议服务器
+└── __init__.py
+
+## 架构分层
+
+Layer 1: MCP Tools
+  └─> export_document, convert_file_document, get_supported_conversions
+
+Layer 2: Services
+  ├─> export/service.py (Markdown 导出编排)
+  └─> conversion/services/conversion_service.py (文档转换编排)
+
+Layer 3: Engines & Generators
+  ├─> export/generators/* (格式生成器)
+  └─> conversion/engines/* (转换引擎)
+
+Layer 4: IR & Storage
+  ├─> conversion/ir/* (中间表示)
+  └─> storage/manager.py (文件存储)
+
+Layer 5: Utils
+  └─> utils/* (公共工具函数)
+
+## 当前转换能力
+
+✅ Office → PDF (LibreOffice)
+✅ PDF → TXT/MD (PyMuPDF)
+✅ MD/TXT → PDF/DOCX/HTML (Markdown Engine)
+✅ Office 格式互转 (LibreOffice)
+⏳ PDF → DOCX (需要 FreeP2W 引擎)
+⏳ 扫描 PDF → 文本 (需要 OCR 引擎)
+

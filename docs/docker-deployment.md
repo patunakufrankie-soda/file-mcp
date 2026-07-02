@@ -88,9 +88,11 @@ docker run -d \
   -e FORMAT_EXPORT_HOST=0.0.0.0 \
   -e FORMAT_EXPORT_PORT=8000 \
   -e FORMAT_EXPORT_STORAGE_DIR=/app/format_export_mcp/storage/exports \
-  -e FORMAT_EXPORT_PUBLIC_BASE_URL=/downloads \
+  -e FORMAT_EXPORT_PUBLIC_BASE_URL=http://你的AWS公网IP:8000/downloads \
+  -e FILE_SERVER_BASE_URL=https://你的文件服务域名 \
   -e FORMAT_EXPORT_FILE_TTL_SECONDS=604800 \
   -e FORMAT_EXPORT_RATE_LIMIT_PER_MINUTE=20 \
+  -e 'FORMAT_EXPORT_ALLOWED_ORIGINS=*' \
   -v /data/format-export/exports:/app/format_export_mcp/storage/exports \
   format-export-mcp:latest
 ```
@@ -172,6 +174,26 @@ FORMAT_EXPORT_PUBLIC_BASE_URL=https://format-export.example.com/downloads
 
 否则接口返回的 `file_url` 可能不是前端可直接访问的地址。
 
+如果调用方会传相对文件地址，例如：
+
+```text
+/api/file/abc123
+```
+
+还必须配置文件服务基址：
+
+```bash
+FILE_SERVER_BASE_URL=https://platform.example.com
+```
+
+服务端会把它拼成：
+
+```text
+https://platform.example.com/api/file/abc123
+```
+
+如果不配这个变量，`/api/convert_file_document` 在收到相对 `input_uri` 时会直接返回参数错误。
+
 ## 8. 文件保留与限流
 
 导出文件会按 TTL 清理：
@@ -221,13 +243,13 @@ curl -X POST http://127.0.0.1:8000/api/export_document \
 curl "http://127.0.0.1:8000/downloads/<file_name>"
 ```
 
-文档转换接口验证：
+文件转换接口验证：
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/convert_document \
+curl -X POST http://127.0.0.1:8000/api/convert_file_document \
   -H "Content-Type: application/json" \
-  -H "X-Request-ID: deploy-convert-001" \
-  -d '{"title":"市场分析","source_format":"markdown","target_format":"pdf","content":"# 标题\n\n1.**数字化转型加速**：内容"}'
+  -H "X-Request-ID: deploy-file-convert-001" \
+  -d '{"input_uri":"/tmp/sample.txt","target_format":"md","mode":"normal"}'
 ```
 
 ## 10. 日志
@@ -247,7 +269,7 @@ docker logs -f format-export-mcp
 - `format`
 - `error_code`
 
-文档转换日志还会出现：
+文件转换日志还会出现：
 
 - `source_format`
 - `target_format`
@@ -265,7 +287,7 @@ docker logs -f format-export-mcp
 5. 服务器执行 `docker load`
 6. 删除旧容器并重新 `docker run -d ...`
 7. 检查 `/ready`
-8. 用 `curl` 测 `export_document` 和 `convert_document`
+8. 用 `curl` 测 `export_document` 和 `convert_file_document`
 
 如果只是修改环境变量，不改代码，则不需要重新 build 镜像，只需要在服务器上重建容器。
 

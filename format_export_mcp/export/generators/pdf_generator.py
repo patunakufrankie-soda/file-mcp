@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .image_sources import load_image_assets
-from .markdown_blocks import parse_markdown_blocks, render_markdown_inlines_as_reportlab
+from ...utils.image_sources import load_image_assets
+from ...utils.markdown_blocks import (
+    parse_markdown_blocks,
+    render_markdown_inlines_as_reportlab,
+)
 
 
-def generate_pdf(title: str, content: str, output_path: Path, images: list[str] | None = None) -> None:
+def generate_pdf(
+    title: str, content: str, output_path: Path, images: list[str] | None = None
+) -> None:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
@@ -14,7 +19,15 @@ def generate_pdf(title: str, content: str, output_path: Path, images: list[str] 
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.cidfonts import UnicodeCIDFont
     from reportlab.lib.utils import ImageReader
-    from reportlab.platypus import Image, Paragraph, Preformatted, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.platypus import (
+        Image,
+        Paragraph,
+        Preformatted,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
 
     font_name = "STSong-Light"
 
@@ -65,12 +78,47 @@ def generate_pdf(title: str, content: str, output_path: Path, images: list[str] 
         title=title or "Export",
     )
 
-    story = [Paragraph(render_markdown_inlines_as_reportlab(title or "Export"), title_style), Spacer(1, 6 * mm)]
+    story = [
+        Paragraph(render_markdown_inlines_as_reportlab(title or "Export"), title_style),
+        Spacer(1, 6 * mm),
+    ]
     heading_styles = {
-        1: ParagraphStyle("Heading1", parent=body_style, fontName=font_name, fontSize=18, leading=24, spaceBefore=6, spaceAfter=8),
-        2: ParagraphStyle("Heading2", parent=body_style, fontName=font_name, fontSize=16, leading=22, spaceBefore=6, spaceAfter=8),
-        3: ParagraphStyle("Heading3", parent=body_style, fontName=font_name, fontSize=14, leading=20, spaceBefore=4, spaceAfter=6),
-        4: ParagraphStyle("Heading4", parent=body_style, fontName=font_name, fontSize=13, leading=18, spaceBefore=4, spaceAfter=6),
+        1: ParagraphStyle(
+            "Heading1",
+            parent=body_style,
+            fontName=font_name,
+            fontSize=18,
+            leading=24,
+            spaceBefore=6,
+            spaceAfter=8,
+        ),
+        2: ParagraphStyle(
+            "Heading2",
+            parent=body_style,
+            fontName=font_name,
+            fontSize=16,
+            leading=22,
+            spaceBefore=6,
+            spaceAfter=8,
+        ),
+        3: ParagraphStyle(
+            "Heading3",
+            parent=body_style,
+            fontName=font_name,
+            fontSize=14,
+            leading=20,
+            spaceBefore=4,
+            spaceAfter=6,
+        ),
+        4: ParagraphStyle(
+            "Heading4",
+            parent=body_style,
+            fontName=font_name,
+            fontSize=13,
+            leading=18,
+            spaceBefore=4,
+            spaceAfter=6,
+        ),
     }
 
     def _build_image_story(image_ref: str) -> list:
@@ -80,7 +128,10 @@ def generate_pdf(title: str, content: str, output_path: Path, images: list[str] 
         image_width, image_height = image_reader.getSize()
         target_width = 170 * mm
         target_height = target_width * image_height / image_width
-        return [Spacer(1, 4 * mm), Image(image_buffer, width=target_width, height=target_height)]
+        return [
+            Spacer(1, 4 * mm),
+            Image(image_buffer, width=target_width, height=target_height),
+        ]
 
     for block in parse_markdown_blocks(content or "") or [None]:
         if block is None:
@@ -88,15 +139,29 @@ def generate_pdf(title: str, content: str, output_path: Path, images: list[str] 
             continue
 
         if block.kind == "heading":
-            story.append(Paragraph(render_markdown_inlines_as_reportlab(block.text), heading_styles[min(block.level, 4)]))
+            story.append(
+                Paragraph(
+                    render_markdown_inlines_as_reportlab(block.text),
+                    heading_styles[min(block.level, 4)],
+                )
+            )
             continue
 
         if block.kind == "bullet_item":
-            story.append(Paragraph(f"• {render_markdown_inlines_as_reportlab(block.text)}", body_style))
+            story.append(
+                Paragraph(
+                    f"• {render_markdown_inlines_as_reportlab(block.text)}", body_style
+                )
+            )
             continue
 
         if block.kind == "ordered_item":
-            story.append(Paragraph(f"{block.level}. {render_markdown_inlines_as_reportlab(block.text)}", body_style))
+            story.append(
+                Paragraph(
+                    f"{block.level}. {render_markdown_inlines_as_reportlab(block.text)}",
+                    body_style,
+                )
+            )
             continue
 
         if block.kind == "code":
@@ -109,7 +174,10 @@ def generate_pdf(title: str, content: str, output_path: Path, images: list[str] 
 
         if block.kind == "table" and block.rows:
             table_data = [
-                [Paragraph(render_markdown_inlines_as_reportlab(cell), body_style) for cell in row]
+                [
+                    Paragraph(render_markdown_inlines_as_reportlab(cell), body_style)
+                    for cell in row
+                ]
                 for row in block.rows
             ]
             table = Table(table_data, repeatRows=1)
@@ -131,7 +199,9 @@ def generate_pdf(title: str, content: str, output_path: Path, images: list[str] 
             story.append(Spacer(1, 6 * mm))
             continue
 
-        story.append(Paragraph(render_markdown_inlines_as_reportlab(block.text), body_style))
+        story.append(
+            Paragraph(render_markdown_inlines_as_reportlab(block.text), body_style)
+        )
 
     for image_asset in load_image_assets(list(images or [])):
         image_buffer = image_asset.open_bytes()

@@ -3,7 +3,10 @@ from __future__ import annotations
 from html import escape
 from pathlib import Path
 
-from .markdown_blocks import parse_markdown_blocks, render_markdown_inlines_as_html
+from ...utils.markdown_blocks import (
+    parse_markdown_blocks,
+    render_markdown_inlines_as_html,
+)
 
 
 def generate_html(title: str, content: str, output_path: Path) -> None:
@@ -33,19 +36,28 @@ def generate_html(title: str, content: str, output_path: Path) -> None:
         flush_list()
         if block.kind == "heading":
             level = min(block.level + 1, 6)
-            fragments.append(f"<h{level}>{render_markdown_inlines_as_html(block.text)}</h{level}>")
+            fragments.append(
+                f"<h{level}>{render_markdown_inlines_as_html(block.text)}</h{level}>"
+            )
         elif block.kind == "code":
             fragments.append(f"<pre><code>{escape(block.text)}</code></pre>")
         elif block.kind == "table" and block.rows:
             header_row, *body_rows = block.rows
-            header_html = "".join(f"<th>{render_markdown_inlines_as_html(cell)}</th>" for cell in header_row)
+            header_html = "".join(
+                f"<th>{render_markdown_inlines_as_html(cell)}</th>"
+                for cell in header_row
+            )
             body_html = "".join(
                 "<tr>"
-                + "".join(f"<td>{render_markdown_inlines_as_html(cell)}</td>" for cell in row)
+                + "".join(
+                    f"<td>{render_markdown_inlines_as_html(cell)}</td>" for cell in row
+                )
                 + "</tr>"
                 for row in body_rows
             )
-            fragments.append(f"<table><thead><tr>{header_html}</tr></thead><tbody>{body_html}</tbody></table>")
+            fragments.append(
+                f"<table><thead><tr>{header_html}</tr></thead><tbody>{body_html}</tbody></table>"
+            )
         else:
             fragments.append(f"<p>{render_markdown_inlines_as_html(block.text)}</p>")
 
