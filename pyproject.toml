@@ -15,6 +15,7 @@ dependencies = [
     "PyYAML>=6.0",
     "pdf2docx>=0.5.8",
     "Pillow>=10.0.0",
+    "pytest"
 ]
 
 [project.optional-dependencies]
