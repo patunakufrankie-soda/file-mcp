@@ -183,8 +183,8 @@ def create_http_middleware() -> list[Middleware]:
         # some versions emit "*", others mirror the request origin only when
         # credentials or a regex path is involved.
         cors_kwargs["allow_origins"] = ["*"]
-        cors_kwargs["allow_origin_regex"] = ".*"
-        cors_kwargs["allow_credentials"] = True
+        cors_kwargs["allow_origin_regex"] = None
+        cors_kwargs["allow_credentials"] = False
     else:
         cors_kwargs["allow_origins"] = allowed_origins
     return [Middleware(CORSMiddleware, **cors_kwargs)]
