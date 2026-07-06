@@ -175,11 +175,16 @@ def create_http_middleware() -> list[Middleware]:
     allowed_origins = _get_allowed_origins()
     cors_kwargs: dict[str, Any] = {
         "allow_methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "X-Request-ID"],
+        "allow_headers": ["*"],
         "expose_headers": ["X-Request-ID"],
     }
     if allowed_origins == ["*"]:
+        # Keep wildcard CORS behavior stable across Starlette releases:
+        # some versions emit "*", others mirror the request origin only when
+        # credentials or a regex path is involved.
+        cors_kwargs["allow_origins"] = ["*"]
         cors_kwargs["allow_origin_regex"] = ".*"
+        cors_kwargs["allow_credentials"] = True
     else:
         cors_kwargs["allow_origins"] = allowed_origins
     return [Middleware(CORSMiddleware, **cors_kwargs)]
