@@ -376,8 +376,8 @@ du -sh /mnt/nfs/format-export/exports
 
 ## 📞 技术支持
 
-- 代码检查报告: `docs/code_review_report.md`
-- 测试脚本: `./run_tests.sh`
+- 架构说明: `docs/ARCHITECTURE.md`
+- 测试目录: `tests/`
 - 项目仓库: [内部地址]
 
 **部署完成后建议**:

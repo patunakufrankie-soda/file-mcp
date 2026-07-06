@@ -117,21 +117,22 @@ curl -X POST http://localhost:8000/api/convert_file_document \
 
 ---
 
-## 📂 生成的文件说明
+## 📂 关键文件说明
 
-```
+```text
 file_mcp/
-├── configure.sh              # 配置向导（交互式）
-├── deploy.sh                 # 一键部署脚本
-├── run_tests.sh              # 测试脚本
-├── DEPLOYMENT.md             # 详细部署文档
+├── DEPLOYMENT.md
 ├── docs/
-│   └── code_review_report.md # 代码检查报告
+│   ├── ARCHITECTURE.md
+│   ├── docker-deployment.md
+│   └── frontend-integration.md
 ├── format_export_mcp/
-│   ├── docker-compose.yml    # Docker Compose 配置
-│   ├── Dockerfile            # Docker 镜像定义
-│   └── .env                  # 环境变量（生成后）
-└── nginx.conf.example        # Nginx 配置示例（生成后）
+│   ├── docker-compose.yml
+│   ├── Dockerfile
+│   ├── nginx.format-export.conf
+│   └── README.md
+├── tests/
+└── pyproject.toml
 ```
 
 ---
@@ -206,8 +207,8 @@ sudo systemctl reload nginx
 ## 📞 支持文档
 
 - **完整部署文档**: `DEPLOYMENT.md`
-- **代码检查报告**: `docs/code_review_report.md`
-- **测试报告**: 运行 `./run_tests.sh -v`
+- **Docker 部署细节**: `docs/docker-deployment.md`
+- **架构说明**: `docs/ARCHITECTURE.md`
 
 ---
 

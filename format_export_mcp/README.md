@@ -21,30 +21,41 @@ Format Export MCP 是一个通用格式导出 MCP Server，用于把文档解析
 
 ```text
 format_export_mcp/
+├── mcp/
+│   ├── __init__.py
+│   └── tools.py
+├── export/
+│   ├── __init__.py
+│   ├── service.py
+│   └── generators/
+├── conversion/
+│   ├── __init__.py
+│   ├── conversion_matrix.py
+│   ├── file_document_convert.py
+│   ├── router.py
+│   ├── engines/
+│   ├── ir/
+│   └── services/
+├── storage/
+│   ├── __init__.py
+│   └── manager.py
+├── utils/
+│   ├── __init__.py
+│   ├── command_utils.py
+│   ├── format_utils.py
+│   ├── image_sources.py
+│   ├── input_loader.py
+│   ├── markdown_blocks.py
+│   └── tabular.py
+├── server_common.py
 ├── server_stdio.py
 ├── server_sse.py
 ├── server_streamable_http.py
-├── server_common.py
-├── tools/
-│   ├── command_utils.py
-│   ├── conversion_matrix.py
-│   ├── export_document.py
-│   ├── file_document_convert.py
-│   ├── format_utils.py
-│   ├── input_loader.py
-│   ├── pdf_generator.py
-│   ├── docx_generator.py
-│   ├── txt_generator.py
-│   ├── md_generator.py
-│   ├── html_generator.py
-│   └── storage.py
-├── storage/
-│   └── exports/
 ├── Dockerfile
 └── README.md
 ```
 
-`tools/export_document.py` 是业务入口，三个 `server_*.py` 只负责切换传输协议。依赖统一维护在根目录 `pyproject.toml`，后续新增格式或更换存储目录，不需要改传输层代码。
+`mcp/tools.py` 提供对外的 tool 包装，`export/service.py` 和 `conversion/file_document_convert.py` 是两条业务入口，三个 `server_*.py` 只负责切换传输协议。依赖统一维护在根目录 `pyproject.toml`，后续新增格式或更换存储目录，不需要改传输层代码。
 
 ## uv 安装
 
@@ -81,17 +92,27 @@ uv sync
 
 ## MCP Tool 注册代码
 
-Tool 注册集中在 `server_common.py`：
+Tool 注册集中在 `server_common.py`，tool 包装定义在 `mcp/tools.py`：
 
 ```python
 from fastmcp import FastMCP
-from format_export_mcp.tools.export_document import export_document
+from format_export_mcp.export.service import export_document
 
 mcp = FastMCP("Format Export MCP")
 
 @mcp.tool(name="export_document")
-def export_document_tool(title: str, content: str, format: str):
-    return export_document(title=title, content=content, format=format)
+def export_document_tool(
+    title: str,
+    content: str,
+    format: str,
+    images: list[str] | None = None,
+):
+    return export_document(
+        title=title,
+        content=content,
+        format=format,
+        images=images,
+    )
 ```
 
 当前工程还注册了 HTTP 辅助路由：
