@@ -11,7 +11,6 @@ services:
       FORMAT_EXPORT_PORT: 8000
       FORMAT_EXPORT_STORAGE_DIR: /data/format-export/exports
       FORMAT_EXPORT_PUBLIC_BASE_URL: /downloads
-      FILE_SERVER_BASE_URL: https://platform.example.com
 
       # Nacos 开关
       NACOS_ENABLED: "true"

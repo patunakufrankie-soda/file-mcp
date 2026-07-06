@@ -7,6 +7,7 @@ from .engines.base import BaseEngine
 from .engines.pdf_engine import PdfEngine
 from .engines.libreoffice_engine import LibreOfficeEngine
 from .engines.markdown_engine import MarkdownEngine
+from .engines.docx_engine import DocxEngine
 from .engines.pdf_to_docx_engine import PdfToDocxEngine
 from .engines.pdf2docx_engine import Pdf2DocxEngine
 from .services.format_detector import DocumentFeatures
@@ -66,11 +67,14 @@ class ConversionRouter:
                 self._routes[(source, target)] = ConversionRoute(
                     primary=MarkdownEngine, fallbacks=[]
                 )
+        self._routes[("txt", "md")] = ConversionRoute(
+            primary=MarkdownEngine, fallbacks=[]
+        )
 
-        # DOCX → Text formats: Markdown engine (extracts text then converts)
+        # DOCX → Text formats: Docx engine (extracts text using python-docx)
         for text_format in ["txt", "md"]:
             self._routes[("docx", text_format)] = ConversionRoute(
-                primary=MarkdownEngine, fallbacks=[]
+                primary=DocxEngine, fallbacks=[]
             )
 
         # Office ↔ Office (same family): LibreOffice

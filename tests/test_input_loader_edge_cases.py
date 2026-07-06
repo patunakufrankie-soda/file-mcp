@@ -32,7 +32,7 @@ class InputLoaderEdgeCaseTests(unittest.TestCase):
             load_input(None)  # type: ignore
 
     def test_rejects_non_existent_local_file(self) -> None:
-        with self.assertRaisesRegex(ConversionError, "file not found"):
+        with self.assertRaisesRegex(ConversionError, "Input file not found"):
             load_input("/nonexistent/path/to/file.txt")
 
     def test_rejects_unsupported_file_extension(self) -> None:
@@ -50,7 +50,7 @@ class InputLoaderEdgeCaseTests(unittest.TestCase):
     def test_rejects_relative_api_path_without_base_url(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(
-                ConversionError, "FILE_SERVER_BASE_URL environment variable is not set"
+                ConversionError, "base URL not configured"
             ):
                 load_input("/api/file/12345.txt")
 
@@ -61,10 +61,10 @@ class InputLoaderEdgeCaseTests(unittest.TestCase):
         # 模拟内网文件服务URL拼接
         with patch.dict(os.environ, {"FILE_SERVER_BASE_URL": "http://localhost:8000"}):
             with patch(
-                "format_export_mcp.tools.input_loader._download_remote_input"
+                "format_export_mcp.utils.input_loader._download_remote_input"
             ) as mock_download:
                 # 模拟成功下载
-                from format_export_mcp.tools.input_loader import LoadedInput
+                from format_export_mcp.utils.input_loader import LoadedInput
 
                 mock_download.return_value = LoadedInput(
                     input_uri="http://localhost:8000/api/file/12345.txt",
@@ -97,7 +97,7 @@ class InputLoaderEdgeCaseTests(unittest.TestCase):
         result.cleanup()
 
     def test_load_local_pdf_file(self) -> None:
-        from format_export_mcp.tools.export_document import export_document
+        from format_export_mcp.export.service import export_document
 
         os.environ["FORMAT_EXPORT_STORAGE_DIR"] = self._tmpdir.name
         pdf_result = export_document(
@@ -110,7 +110,7 @@ class InputLoaderEdgeCaseTests(unittest.TestCase):
         result.cleanup()
 
     def test_load_local_docx_file(self) -> None:
-        from format_export_mcp.tools.export_document import export_document
+        from format_export_mcp.export.service import export_document
 
         os.environ["FORMAT_EXPORT_STORAGE_DIR"] = self._tmpdir.name
         docx_result = export_document(

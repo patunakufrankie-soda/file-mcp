@@ -5,8 +5,6 @@ import logging
 import atexit
 
 from .server_common import create_http_middleware, create_mcp
-from .nacos.manager import NacosManager
-from .nacos.config import NacosConfig
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +17,9 @@ def main() -> None:
 
     # 初始化 Nacos
     try:
+        from .nacos.config import NacosConfig
+        from .nacos.manager import NacosManager
+
         nacos_config = NacosConfig.from_env()
         nacos_config.ip = None if host == "0.0.0.0" else host
         nacos_config.port = port

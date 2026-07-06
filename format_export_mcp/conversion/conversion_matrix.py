@@ -11,8 +11,12 @@ SUPPORTED_CONVERSIONS = {
     "docx": ["txt", "md", "pdf"],
 }
 NOTES = {
-    "pdf_to_docx": "第一版采用文本提取策略生成可编辑 docx，不保证复杂版式还原",
-    "docx_to_pdf": "不使用 LibreOffice，第一版采用提取文本后重新生成 PDF 的方式，不保证原 Word 版式完全一致",
+    "pdf_to_docx": (
+        "采用可编辑内容重建；复杂版式可选用 pdf2docx，"
+        "未安装时回退到 PyMuPDF + python-docx"
+    ),
+    "docx_to_pdf": "依赖 LibreOffice headless 转换并尽量保留原始版式",
+    "scanned_pdf": "扫描型 PDF 尚未实现 OCR，转换时返回 OCR_REQUIRED",
 }
 
 

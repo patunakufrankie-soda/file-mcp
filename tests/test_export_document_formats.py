@@ -238,7 +238,7 @@ class ExportDocumentFormatTests(unittest.TestCase):
             return FakeHTTPResponse(PNG_BYTES)
 
         with patch(
-            "format_export_mcp.tools.image_sources.urlopen", side_effect=fake_urlopen
+            "format_export_mcp.utils.image_sources.urlopen", side_effect=fake_urlopen
         ):
             result = export_document(
                 title="远程图片PDF", content="", format="pdf", images=[remote_url]
@@ -264,7 +264,7 @@ class ExportDocumentFormatTests(unittest.TestCase):
             {"FORMAT_EXPORT_IMAGE_SOURCE_BASE_URL": "https://kb.example.com"},
         ):
             with patch(
-                "format_export_mcp.tools.image_sources.urlopen",
+                "format_export_mcp.utils.image_sources.urlopen",
                 side_effect=fake_urlopen,
             ):
                 result = export_document(
@@ -346,6 +346,82 @@ class ExportDocumentFormatTests(unittest.TestCase):
             ],
         )
 
+    def test_markdown_parser_preserves_common_business_document_structure(
+        self,
+    ) -> None:
+        from format_export_mcp.utils.markdown_blocks import (
+            parse_markdown_blocks,
+            parse_markdown_inlines,
+        )
+
+        blocks = parse_markdown_blocks(
+            "## 小节\n\n"
+            "- 父项\n"
+            "  - 子项\n"
+            "1. 第一项\n"
+            "  2. 第二层\n\n"
+            "> 引用 **内容**\n"
+            "> 第二行\n\n"
+            "[项目地址](https://example.com)  \n"
+            "下一行\n\n"
+            "---\n\n"
+            "```python\nprint('ok')\n```"
+        )
+
+        self.assertEqual(
+            [block.kind for block in blocks],
+            [
+                "heading",
+                "bullet_item",
+                "bullet_item",
+                "ordered_item",
+                "ordered_item",
+                "blockquote",
+                "paragraph",
+                "horizontal_rule",
+                "code",
+            ],
+        )
+        self.assertEqual(blocks[2].depth, 1)
+        self.assertEqual(blocks[4].depth, 1)
+        self.assertEqual(blocks[5].text, "引用 **内容**\n第二行")
+        self.assertEqual(blocks[6].text, "[项目地址](https://example.com)  \n下一行")
+        self.assertEqual(blocks[8].info, "python")
+
+        spans = parse_markdown_inlines("[项目地址](https://example.com)")
+        self.assertEqual(spans[0].text, "项目地址")
+        self.assertEqual(spans[0].href, "https://example.com")
+
+        strike_spans = parse_markdown_inlines("~~删除内容~~")
+        self.assertEqual(strike_spans[0].text, "删除内容")
+        self.assertIn("strike", strike_spans[0].styles)
+
+    def test_markdown_plain_text_renderer_keeps_semantics_without_markup(
+        self,
+    ) -> None:
+        from format_export_mcp.utils.markdown_blocks import render_markdown_as_text
+
+        output = render_markdown_as_text(
+            "## 小节\n\n"
+            "- 父项\n"
+            "  - **子项**\n\n"
+            "> 引用 [地址](https://example.com)\n\n"
+            "![架构图](https://example.com/architecture.png)\n\n"
+            "---"
+        )
+
+        self.assertIn("小节", output)
+        self.assertIn("• 父项", output)
+        self.assertIn("  • 子项", output)
+        self.assertIn("  引用 地址 (https://example.com)", output)
+        self.assertIn(
+            "架构图 (https://example.com/architecture.png)",
+            output,
+        )
+        self.assertIn("----------------------------------------", output)
+        self.assertNotIn("**", output)
+        self.assertNotIn("> ", output)
+
     def test_markdown_parser_identifies_standalone_images(self) -> None:
         from format_export_mcp.utils.markdown_blocks import parse_markdown_blocks
 
@@ -425,6 +501,101 @@ class ExportDocumentFormatTests(unittest.TestCase):
         self.assertIn("<strong>数字化转型加速</strong>", html_text)
         self.assertIn("<ol>", html_text)
 
+    def test_plain_txt_is_not_interpreted_as_markdown_in_pdf_or_docx(
+        self,
+    ) -> None:
+        from format_export_mcp.conversion.file_document_convert import (
+            convert_file_document,
+        )
+
+        source = Path(self._tmpdir.name) / "literal.txt"
+        source.write_text("# Literal Heading\n- Literal Item", encoding="utf-8")
+
+        docx_result = convert_file_document(str(source), "docx")
+        self.assertTrue(docx_result.get("success"))
+        with ZipFile(str(docx_result.get("output_path"))) as archive:
+            document_xml = archive.read("word/document.xml").decode("utf-8")
+        self.assertIn("# Literal Heading", document_xml)
+        self.assertIn("- Literal Item", document_xml)
+        self.assertEqual(document_xml.count('w:pStyle w:val="Heading1"'), 1)
+
+        pdf_result = convert_file_document(str(source), "pdf")
+        self.assertTrue(pdf_result.get("success"))
+        import fitz
+
+        with fitz.open(str(pdf_result.get("output_path"))) as pdf:
+            pdf_text = "\n".join(page.get_text() for page in pdf)
+        self.assertIn("# Literal Heading", pdf_text)
+        self.assertIn("- Literal Item", pdf_text)
+
+    def test_enhanced_markdown_structure_renders_in_docx(self) -> None:
+        from format_export_mcp.export.service import export_document
+
+        content = (
+            "# Business Report\n\n"
+            "##### Heading Five\n\n"
+            "- Parent\n"
+            "  - Child\n\n"
+            "> Quoted [reference](https://example.com)\n\n"
+            "```python\nprint('ok')\n```\n\n"
+            "| Name | State |\n| --- | --- |\n| Alice | Ready |\n\n"
+            "---"
+        )
+        result = export_document(
+            title="Business Report",
+            content=content,
+            format="docx",
+        )
+        docx_path = Path(self._tmpdir.name) / result["file_name"]
+
+        with ZipFile(docx_path) as archive:
+            document_xml = archive.read("word/document.xml").decode("utf-8")
+            relationships_xml = archive.read(
+                "word/_rels/document.xml.rels"
+            ).decode("utf-8")
+
+        self.assertEqual(document_xml.count("Business Report"), 1)
+        self.assertIn('w:pStyle w:val="Heading5"', document_xml)
+        self.assertIn("w:ind", document_xml)
+        self.assertIn('w:pStyle w:val="IntenseQuote"', document_xml)
+        self.assertIn("w:hyperlink", document_xml)
+        self.assertIn("https://example.com", relationships_xml)
+        self.assertIn("w:pBdr", document_xml)
+        self.assertIn("w:tblHeader", document_xml)
+
+    def test_enhanced_markdown_structure_renders_in_pdf(self) -> None:
+        import fitz
+
+        from format_export_mcp.export.service import export_document
+
+        content = (
+            "# Business Report\n\n"
+            "##### Heading Five\n\n"
+            "- Parent\n"
+            "  - Child\n\n"
+            "> Quoted [reference](https://example.com)\n\n"
+            "---"
+        )
+        result = export_document(
+            title="Business Report",
+            content=content,
+            format="pdf",
+        )
+        pdf_path = Path(self._tmpdir.name) / result["file_name"]
+
+        with fitz.open(pdf_path) as pdf:
+            pdf_text = "\n".join(page.get_text() for page in pdf)
+            links = [link for page in pdf for link in page.get_links()]
+
+        self.assertEqual(pdf_text.count("Business Report"), 1)
+        self.assertIn("Heading Five", pdf_text)
+        self.assertIn("Parent", pdf_text)
+        self.assertIn("Child", pdf_text)
+        self.assertIn("Quoted reference", pdf_text)
+        self.assertTrue(
+            any(link.get("uri") == "https://example.com" for link in links)
+        )
+
     def test_inline_html_styles_and_markdown_tables_survive_common_exports(
         self,
     ) -> None:
@@ -486,7 +657,7 @@ class ExportDocumentFormatTests(unittest.TestCase):
         )
 
         source = Path(self._tmpdir.name) / "sample.txt"
-        source.write_text("第一行\n第二行", encoding="utf-8")
+        source.write_text("# 普通文本标题\n- 普通文本条目", encoding="utf-8")
 
         result = convert_file_document(str(source), "md")
         self.assertTrue(result.get("success"))
@@ -494,7 +665,10 @@ class ExportDocumentFormatTests(unittest.TestCase):
         self.assertEqual(result.get("target_format"), "md")
         output_path = str(result.get("output_path"))
         self.assertTrue(output_path.endswith(".md"))
-        self.assertIn("第一行", Path(output_path).read_text(encoding="utf-8"))
+        self.assertEqual(
+            Path(output_path).read_text(encoding="utf-8"),
+            "# 普通文本标题\n- 普通文本条目",
+        )
 
     def test_convert_file_document_local_txt_to_docx(self) -> None:
         from format_export_mcp.conversion.file_document_convert import (
@@ -518,7 +692,11 @@ class ExportDocumentFormatTests(unittest.TestCase):
         )
 
         source = Path(self._tmpdir.name) / "sample.md"
-        source.write_text("# 标题\n\n- 条目", encoding="utf-8")
+        source.write_text(
+            "# 标题\n\n- **条目**\n\n"
+            "| 姓名 | 状态 |\n| --- | --- |\n| 张三 | 正常 |",
+            encoding="utf-8",
+        )
 
         result = convert_file_document(str(source), "txt")
         self.assertTrue(result.get("success"))
@@ -528,6 +706,10 @@ class ExportDocumentFormatTests(unittest.TestCase):
         self.assertIn("标题", output_text)
         self.assertIn("条目", output_text)
         self.assertNotIn("# ", output_text)
+        self.assertNotIn("**", output_text)
+        self.assertNotIn("| ---", output_text)
+        self.assertIn("姓名\t状态", output_text)
+        self.assertIn("张三\t正常", output_text)
 
     def test_convert_file_document_local_pdf_to_txt(self) -> None:
         from format_export_mcp.conversion.file_document_convert import (
@@ -540,7 +722,8 @@ class ExportDocumentFormatTests(unittest.TestCase):
         output_text = Path(str(result.get("output_path"))).read_text(
             encoding="utf-8-sig"
         )
-        self.assertIn("Page 1", output_text)
+        self.assertIn("PDF样例", output_text)
+        self.assertIn("第一页内容", output_text)
 
     def test_convert_file_document_local_pdf_to_md(self) -> None:
         from format_export_mcp.conversion.file_document_convert import (
@@ -551,7 +734,8 @@ class ExportDocumentFormatTests(unittest.TestCase):
         result = convert_file_document(str(source), "md")
         self.assertTrue(result.get("success"))
         output_text = Path(str(result.get("output_path"))).read_text(encoding="utf-8")
-        self.assertIn("## Page 1", output_text)
+        self.assertIn("PDF样例", output_text)
+        self.assertIn("第一页内容", output_text)
 
     def test_convert_file_document_local_pdf_to_docx(self) -> None:
         from format_export_mcp.conversion.file_document_convert import (
@@ -563,36 +747,44 @@ class ExportDocumentFormatTests(unittest.TestCase):
         self.assertTrue(result.get("success"))
         with ZipFile(str(result.get("output_path"))) as archive:
             document_xml = archive.read("word/document.xml").decode("utf-8")
-        self.assertIn("Page 1", document_xml)
+        self.assertIn("PDF样例", document_xml)
+        self.assertIn("第一页内容", document_xml)
 
     def test_convert_file_document_local_docx_to_txt(self) -> None:
         from format_export_mcp.conversion.file_document_convert import (
             convert_file_document,
         )
 
-        source = self._create_sample_docx("DOCX样例", "第一段\n\n第二段")
+        source = self._create_sample_docx(
+            "DOCX样例",
+            "表格前\n\n| 列1 | 列2 |\n| --- | --- |\n| 表格A | 表格B |\n\n表格后",
+        )
         result = convert_file_document(str(source), "txt")
         self.assertTrue(result.get("success"))
         output_text = Path(str(result.get("output_path"))).read_text(
             encoding="utf-8-sig"
         )
-        self.assertIn("第一段", output_text)
+        self.assertIn("表格A\t表格B", output_text)
+        self.assertLess(output_text.index("表格前"), output_text.index("表格A"))
+        self.assertLess(output_text.index("表格A"), output_text.index("表格后"))
 
     def test_convert_file_document_local_docx_to_md(self) -> None:
         from format_export_mcp.conversion.file_document_convert import (
             convert_file_document,
         )
 
-        source = self._create_sample_docx("DOCX样例", "第一段\n\n第二段")
-        with patch(
-            "format_export_mcp.tools.file_document_convert.is_pandoc_available",
-            return_value=False,
-        ):
-            result = convert_file_document(str(source), "md")
+        source = self._create_sample_docx(
+            "真实文档标题",
+            "| 列1 | 列2 |\n| --- | --- |\n| 表格A | 表格B |\n\n正文",
+        )
+        result = convert_file_document(str(source), "md")
         self.assertTrue(result.get("success"))
-        self.assertIn("简化转换", str(result.get("message")))
+        self.assertEqual(result.get("message"), "转换成功")
         output_text = Path(str(result.get("output_path"))).read_text(encoding="utf-8")
-        self.assertIn("第一段", output_text)
+        self.assertEqual(output_text.count("# 真实文档标题"), 1)
+        self.assertNotIn(f"# {source.stem}", output_text)
+        self.assertIn("| 表格A | 表格B |", output_text)
+        self.assertIn("正文", output_text)
 
     def test_convert_file_document_local_txt_to_pdf(self) -> None:
         from format_export_mcp.conversion.file_document_convert import (
@@ -614,7 +806,7 @@ class ExportDocumentFormatTests(unittest.TestCase):
         source = self._create_sample_docx("DOCX样例", "第一段\n\n第二段")
         result = convert_file_document(str(source), "pdf")
         self.assertTrue(result.get("success"))
-        self.assertIn("文本重建 PDF", str(result.get("message")))
+        self.assertEqual(result.get("message"), "转换成功")
 
     def test_convert_file_document_downloads_url_input_before_converting(self) -> None:
         from format_export_mcp.conversion.file_document_convert import (
@@ -667,14 +859,10 @@ class ExportDocumentFormatTests(unittest.TestCase):
         source = Path(self._tmpdir.name) / "sample.md"
         source.write_text("# 标题\n\n正文", encoding="utf-8")
 
-        with patch(
-            "format_export_mcp.tools.file_document_convert.is_pandoc_available",
-            return_value=False,
-        ):
-            result = convert_file_document(str(source), "docx")
+        result = convert_file_document(str(source), "docx")
 
         self.assertTrue(result.get("success"))
-        self.assertIn("简化转换", str(result.get("message")))
+        self.assertEqual(result.get("message"), "转换成功")
 
     def test_get_supported_conversions_returns_expected_shape(self) -> None:
         from format_export_mcp.conversion.conversion_matrix import (
@@ -685,6 +873,29 @@ class ExportDocumentFormatTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["formats"], ["txt", "md", "pdf", "docx"])
         self.assertIn("pdf_to_docx", result["notes"])
+
+    def test_supported_conversions_have_real_routes(self) -> None:
+        from format_export_mcp.conversion.conversion_matrix import (
+            SUPPORTED_CONVERSIONS,
+        )
+        from format_export_mcp.conversion.router import ConversionRouter
+        from format_export_mcp.conversion.services.format_detector import (
+            DocumentFeatures,
+        )
+
+        router = ConversionRouter()
+        for source_format, target_formats in SUPPORTED_CONVERSIONS.items():
+            for target_format in target_formats:
+                self.assertNotEqual(source_format, target_format)
+                route = router.get_route(
+                    source_format,
+                    target_format,
+                    DocumentFeatures(recommended_strategy="text_pdf"),
+                )
+                self.assertIsNotNone(
+                    route,
+                    msg=f"missing route for {source_format} -> {target_format}",
+                )
 
     def test_convert_file_document_api_accepts_txt_to_md(self) -> None:
         from format_export_mcp.server_common import create_http_middleware, create_mcp

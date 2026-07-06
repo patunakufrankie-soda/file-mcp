@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 from .base import BaseEngine, ConversionResult
-from ...export.service import export_document
+from ...utils.markdown_blocks import render_markdown_as_text
 
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,17 @@ class MarkdownEngine(BaseEngine):
             content = source_path.read_text(encoding="utf-8")
             title = source_path.stem
 
+            if source_format == "txt" and target_format in ("txt", "md"):
+                output_path.write_text(content, encoding="utf-8")
+                return ConversionResult(success=True, output_path=output_path)
+
+            if source_format in ("md", "markdown") and target_format == "txt":
+                output_path.write_text(
+                    render_markdown_as_text(content),
+                    encoding="utf-8",
+                )
+                return ConversionResult(success=True, output_path=output_path)
+
             # Use export service to generate the target format
             # Note: export_document generates files in storage/exports with special naming
             # We need to generate to a temp location then move
@@ -59,11 +70,23 @@ class MarkdownEngine(BaseEngine):
             if target_format == "pdf":
                 from ...export.generators.pdf_generator import generate_pdf
 
-                generate_pdf(title, content, temp_output, images=[])
+                generate_pdf(
+                    title,
+                    content,
+                    temp_output,
+                    images=[],
+                    input_format=source_format,
+                )
             elif target_format == "docx":
                 from ...export.generators.docx_generator import generate_docx
 
-                generate_docx(title, content, temp_output, images=[])
+                generate_docx(
+                    title,
+                    content,
+                    temp_output,
+                    images=[],
+                    input_format=source_format,
+                )
             elif target_format == "txt":
                 from ...export.generators.txt_generator import generate_txt
 

@@ -19,6 +19,19 @@ DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 20
 DEFAULT_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 
 
+def _get_file_server_base_url() -> str | None:
+    import os
+
+    try:
+        from ..nacos.manager import NacosManager
+
+        base_url = NacosManager.get_config("file_server.base_url")
+    except (ImportError, ModuleNotFoundError):
+        base_url = None
+
+    return base_url or os.getenv("FILE_SERVER_BASE_URL")
+
+
 @dataclass(slots=True)
 class LoadedInput:
     input_uri: str
@@ -83,19 +96,18 @@ def _download_remote_input(input_uri: str) -> LoadedInput:
 
     temp_dir = tempfile.TemporaryDirectory(prefix="format-export-input-")
 
-    # 内网/本地地址跳过代理
-    proxies = (
-        {"http": None, "https": None} if _is_local_or_internal(input_uri) else None
-    )
+    session = requests.Session()
+    if _is_local_or_internal(input_uri):
+        session.trust_env = False
 
     try:
-        response = requests.get(
+        response = session.get(
             input_uri,
             stream=True,
             timeout=DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
-            proxies=proxies,
         )
     except requests.RequestException as exc:
+        session.close()
         temp_dir.cleanup()
         raise ConversionError(
             "download_failed", f"Failed to download input file: {exc}"
@@ -142,6 +154,7 @@ def _download_remote_input(input_uri: str) -> LoadedInput:
         raise
     finally:
         response.close()
+        session.close()
 
 
 def load_input(input_uri: str) -> LoadedInput:
@@ -152,23 +165,32 @@ def load_input(input_uri: str) -> LoadedInput:
 
     normalized = input_uri.strip()
 
-    # 自动拼接内网文件服务 URL：检测到 /api/file/ 开头的相对路径时自动补全
-    if normalized.startswith("/api/file/") or normalized.startswith("/"):
-        import os
-        from ..nacos.manager import NacosManager
+    # 区分本地绝对路径和需要拼接的 API 相对路径
+    if normalized.startswith("/"):
+        # 1. 明确的 API 路径 → 拼接 base URL
+        if normalized.startswith("/api/file/"):
+            base_url = _get_file_server_base_url()
 
-        # 优先从 Nacos 获取，其次环境变量
-        base_url = NacosManager.get_config("file_server.base_url")
-        if not base_url:
-            base_url = os.getenv("FILE_SERVER_BASE_URL")
+            if not base_url:
+                raise ConversionError(
+                    "validation_error",
+                    f"Relative API path detected ({normalized}) but base URL not configured. "
+                    "Set file_server.base_url in Nacos or FILE_SERVER_BASE_URL environment variable",
+                )
+            normalized = base_url.rstrip("/") + normalized
+        # 2. 绝对路径 → 检查文件是否存在，存在则当本地文件处理
+        else:
+            test_path = Path(normalized).expanduser()
+            if test_path.exists() and test_path.is_file():
+                # 本地绝对路径，直接返回
+                return _load_local_input(normalized)
+            # 3. 不存在的 / 开头路径 → 尝试拼接 base URL（容错旧行为）
+            else:
+                base_url = _get_file_server_base_url()
 
-        if not base_url:
-            raise ConversionError(
-                "validation_error",
-                f"Relative file path detected ({normalized}) but base URL not configured. "
-                "Set file_server.base_url in Nacos or FILE_SERVER_BASE_URL environment variable",
-            )
-        normalized = base_url.rstrip("/") + normalized
+                if base_url:
+                    normalized = base_url.rstrip("/") + normalized
+                # 如果没有 base URL 配置，走后续本地路径逻辑，会抛出 file_not_found
 
     parsed = urlparse(normalized)
     if parsed.scheme in {"", None}:

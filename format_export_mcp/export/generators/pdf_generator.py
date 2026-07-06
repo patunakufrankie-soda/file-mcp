@@ -5,12 +5,18 @@ from pathlib import Path
 from ...utils.image_sources import load_image_assets
 from ...utils.markdown_blocks import (
     parse_markdown_blocks,
+    parse_plain_text_blocks,
+    render_markdown_inlines_as_text,
     render_markdown_inlines_as_reportlab,
 )
 
 
 def generate_pdf(
-    title: str, content: str, output_path: Path, images: list[str] | None = None
+    title: str,
+    content: str,
+    output_path: Path,
+    images: list[str] | None = None,
+    input_format: str = "md",
 ) -> None:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -21,6 +27,7 @@ def generate_pdf(
     from reportlab.lib.utils import ImageReader
     from reportlab.platypus import (
         Image,
+        HRFlowable,
         Paragraph,
         Preformatted,
         SimpleDocTemplate,
@@ -66,6 +73,17 @@ def generate_pdf(
         borderPadding=6,
         spaceBefore=2,
         spaceAfter=8,
+    )
+    quote_style = ParagraphStyle(
+        "ChineseQuote",
+        parent=body_style,
+        leftIndent=8 * mm,
+        rightIndent=4 * mm,
+        borderColor=colors.HexColor("#9ca3af"),
+        borderWidth=1,
+        borderPadding=6,
+        textColor=colors.HexColor("#374151"),
+        backColor=colors.HexColor("#f9fafb"),
     )
 
     doc = SimpleDocTemplate(
@@ -119,7 +137,41 @@ def generate_pdf(
             spaceBefore=4,
             spaceAfter=6,
         ),
+        5: ParagraphStyle(
+            "Heading5",
+            parent=body_style,
+            fontName=font_name,
+            fontSize=12,
+            leading=17,
+            spaceBefore=3,
+            spaceAfter=5,
+        ),
+        6: ParagraphStyle(
+            "Heading6",
+            parent=body_style,
+            fontName=font_name,
+            fontSize=11,
+            leading=16,
+            spaceBefore=3,
+            spaceAfter=4,
+        ),
     }
+
+    def _render_inline_text(text: str) -> str:
+        return render_markdown_inlines_as_reportlab(text).replace("\n", "<br/>")
+
+    blocks = (
+        parse_plain_text_blocks(content or "")
+        if input_format == "txt"
+        else parse_markdown_blocks(content or "")
+    )
+    if (
+        blocks
+        and blocks[0].kind == "heading"
+        and render_markdown_inlines_as_text(blocks[0].text).strip()
+        == (title or "Export").strip()
+    ):
+        blocks = blocks[1:]
 
     def _build_image_story(image_ref: str) -> list:
         image_asset = load_image_assets([image_ref])[0]
@@ -133,7 +185,7 @@ def generate_pdf(
             Image(image_buffer, width=target_width, height=target_height),
         ]
 
-    for block in parse_markdown_blocks(content or "") or [None]:
+    for block in blocks or [None]:
         if block is None:
             story.append(Paragraph("", body_style))
             continue
@@ -142,24 +194,53 @@ def generate_pdf(
             story.append(
                 Paragraph(
                     render_markdown_inlines_as_reportlab(block.text),
-                    heading_styles[min(block.level, 4)],
+                    heading_styles[min(block.level, 6)],
                 )
             )
             continue
 
         if block.kind == "bullet_item":
+            list_style = ParagraphStyle(
+                f"BulletDepth{block.depth}",
+                parent=body_style,
+                leftIndent=(block.depth + 1) * 7 * mm,
+                firstLineIndent=-4 * mm,
+            )
             story.append(
                 Paragraph(
-                    f"• {render_markdown_inlines_as_reportlab(block.text)}", body_style
+                    f"• {_render_inline_text(block.text)}",
+                    list_style,
                 )
             )
             continue
 
         if block.kind == "ordered_item":
+            list_style = ParagraphStyle(
+                f"OrderedDepth{block.depth}",
+                parent=body_style,
+                leftIndent=(block.depth + 1) * 7 * mm,
+                firstLineIndent=-5 * mm,
+            )
             story.append(
                 Paragraph(
-                    f"{block.level}. {render_markdown_inlines_as_reportlab(block.text)}",
-                    body_style,
+                    f"{block.level}. {_render_inline_text(block.text)}",
+                    list_style,
+                )
+            )
+            continue
+
+        if block.kind == "blockquote":
+            story.append(Paragraph(_render_inline_text(block.text), quote_style))
+            continue
+
+        if block.kind == "horizontal_rule":
+            story.append(
+                HRFlowable(
+                    width="100%",
+                    thickness=0.7,
+                    color=colors.HexColor("#9ca3af"),
+                    spaceBefore=5,
+                    spaceAfter=8,
                 )
             )
             continue
@@ -175,7 +256,7 @@ def generate_pdf(
         if block.kind == "table" and block.rows:
             table_data = [
                 [
-                    Paragraph(render_markdown_inlines_as_reportlab(cell), body_style)
+                    Paragraph(_render_inline_text(cell), body_style)
                     for cell in row
                 ]
                 for row in block.rows
@@ -200,7 +281,7 @@ def generate_pdf(
             continue
 
         story.append(
-            Paragraph(render_markdown_inlines_as_reportlab(block.text), body_style)
+            Paragraph(_render_inline_text(block.text), body_style)
         )
 
     for image_asset in load_image_assets(list(images or [])):

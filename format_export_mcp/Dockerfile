@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# 安装 pandoc + LibreOffice + 中文字体
+# 安装 pandoc + LibreOffice + Tesseract OCR + 中文字体
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pandoc \
     libreoffice \
@@ -17,6 +17,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice-calc \
     libreoffice-impress \
     libreoffice-java-common \
+    tesseract-ocr \
+    tesseract-ocr-chi-sim \
+    tesseract-ocr-chi-tra \
+    tesseract-ocr-eng \
     fonts-noto-cjk \
     fonts-wqy-zenhei \
     fonts-wqy-microhei \

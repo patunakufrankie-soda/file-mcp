@@ -1,12 +1,21 @@
 from __future__ import annotations
 
-import logging
+import inspect
 import json
-import yaml
+import logging
 import socket
-from typing import Callable, Any
+import threading
+from typing import Any, Callable
 
-import nacos
+import yaml
+from v2.nacos import (
+    ClientConfigBuilder,
+    ConfigParam,
+    DeregisterInstanceParam,
+    NacosConfigService,
+    NacosNamingService,
+    RegisterInstanceParam,
+)
 
 from .config import NacosConfig
 
@@ -14,205 +23,231 @@ logger = logging.getLogger(__name__)
 
 
 class NacosClient:
-    """Nacos 客户端：配置中心 + 服务注册 + 热更新"""
+    """Async adapter for the Nacos 3.x Python gRPC SDK."""
 
     def __init__(self, config: NacosConfig):
         self.config = config
-        self._client: nacos.NacosClient | None = None
+        self._config_service: NacosConfigService | None = None
+        self._naming_service: NacosNamingService | None = None
         self._config_cache: dict[str, Any] = {}
-        self._config_listeners: list[Callable[[dict[str, Any]], None]] = []
+        self._cache_lock = threading.RLock()
+        self._config_listeners: list[Callable[[dict[str, Any]], Any]] = []
+        self._registered_ip: str | None = None
 
-    def initialize(self) -> None:
-        """初始化 Nacos 客户端"""
+    async def initialize(self) -> None:
         if not self.config.enabled:
             logger.info("Nacos integration disabled")
             return
 
+        sdk_config = self._build_client_config()
         try:
-            self._client = nacos.NacosClient(
-                server_addresses=self.config.server_addresses,
-                namespace=self.config.namespace,
-                username=self.config.username,
-                password=self.config.password,
-            )
-            logger.info(
-                f"Nacos client initialized: {self.config.server_addresses}, namespace={self.config.namespace}"
-            )
+            if self.config.enable_config_center or self.config.enable_hot_reload:
+                self._config_service = (
+                    await NacosConfigService.create_config_service(sdk_config)
+                )
+                await self._pull_config()
+                if self.config.enable_hot_reload:
+                    await self._add_config_listener()
 
-            # 拉取配置
-            if self.config.enable_config_center:
-                self._pull_config()
-
-            # 注册服务
             if self.config.enable_service_discovery:
-                self._register_service()
-
-            # 监听配置变更
-            if self.config.enable_hot_reload:
-                self._add_config_listener()
-
-        except Exception as e:
-            logger.error(f"Failed to initialize Nacos client: {e}")
+                self._naming_service = (
+                    await NacosNamingService.create_naming_service(sdk_config)
+                )
+                await self._register_service()
+        except Exception:
+            logger.exception("Failed to initialize Nacos client")
+            await self.shutdown()
             raise
 
-    def _pull_config(self) -> None:
-        """从 Nacos 配置中心拉取配置"""
-        if not self._client:
+        logger.info(
+            "Nacos client initialized: %s, namespace=%s",
+            self.config.server_addresses,
+            self.config.namespace,
+        )
+
+    def _build_client_config(self):
+        builder = (
+            ClientConfigBuilder()
+            .server_address(self.config.server_addresses)
+            .namespace_id(self.config.namespace)
+            .heart_beat_interval(self.config.heartbeat_interval * 1000)
+            .log_level(logging.INFO)
+        )
+        if self.config.username:
+            builder.username(self.config.username)
+        if self.config.password:
+            builder.password(self.config.password)
+        return builder.build()
+
+    async def _pull_config(self) -> None:
+        if self._config_service is None:
             return
 
-        try:
-            content = self._client.get_config(
-                data_id=self.config.data_id,
-                group=self.config.group,
+        content = await self._config_service.get_config(
+            ConfigParam(data_id=self.config.data_id, group=self.config.group)
+        )
+        if not content:
+            logger.warning(
+                "No config found: data_id=%s, group=%s",
+                self.config.data_id,
+                self.config.group,
             )
+            return
 
-            if content:
-                self._config_cache = self._parse_config(content)
-                logger.info(
-                    f"Pulled config from Nacos: {self.config.data_id}, keys={list(self._config_cache.keys())}"
-                )
-            else:
-                logger.warning(
-                    f"No config found: data_id={self.config.data_id}, group={self.config.group}"
-                )
-
-        except Exception as e:
-            logger.error(f"Failed to pull config from Nacos: {e}")
+        parsed = self._parse_config(content)
+        with self._cache_lock:
+            self._config_cache = parsed
+        logger.info(
+            "Pulled config from Nacos: %s, keys=%s",
+            self.config.data_id,
+            list(parsed.keys()),
+        )
 
     def _parse_config(self, content: str) -> dict[str, Any]:
-        """解析配置内容（支持 YAML/JSON）"""
         try:
-            # 尝试 YAML
-            if self.config.data_id.endswith((".yaml", ".yml")):
-                return yaml.safe_load(content) or {}
-            # 尝试 JSON
-            elif self.config.data_id.endswith(".json"):
-                return json.loads(content)
-            # 默认 YAML
+            if self.config.data_id.endswith(".json"):
+                parsed = json.loads(content)
             else:
-                return yaml.safe_load(content) or {}
-        except Exception as e:
-            logger.error(f"Failed to parse config content: {e}")
+                parsed = yaml.safe_load(content)
+        except (json.JSONDecodeError, yaml.YAMLError):
+            logger.exception("Failed to parse Nacos configuration")
             return {}
 
-    def _add_config_listener(self) -> None:
-        """监听配置变更"""
-        if not self._client:
+        if not isinstance(parsed, dict):
+            logger.warning("Nacos configuration root must be a mapping")
+            return {}
+        return parsed
+
+    async def _add_config_listener(self) -> None:
+        if self._config_service is None:
             return
 
-        def callback(content: str) -> None:
-            try:
-                new_config = self._parse_config(content)
-                logger.info(f"Config changed, new keys={list(new_config.keys())}")
+        async def callback(
+            tenant: str,
+            data_id: str,
+            group: str,
+            content: str,
+        ) -> None:
+            del tenant, data_id, group
+            new_config = self._parse_config(content)
+            with self._cache_lock:
                 self._config_cache = new_config
+                listeners = list(self._config_listeners)
 
-                # 通知所有监听器
-                for listener in self._config_listeners:
-                    try:
-                        listener(new_config)
-                    except Exception as e:
-                        logger.error(f"Config listener error: {e}")
+            logger.info("Nacos config changed, keys=%s", list(new_config.keys()))
+            for listener in listeners:
+                try:
+                    result = listener(new_config)
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:
+                    logger.exception("Nacos config listener failed")
 
-            except Exception as e:
-                logger.error(f"Failed to handle config change: {e}")
+        await self._config_service.add_listener(
+            data_id=self.config.data_id,
+            group=self.config.group,
+            listener=callback,
+        )
 
-        try:
-            self._client.add_config_watcher(
-                data_id=self.config.data_id,
-                group=self.config.group,
-                cb=callback,
-            )
-            logger.info(
-                f"Config listener added: data_id={self.config.data_id}, group={self.config.group}"
-            )
-        except Exception as e:
-            logger.error(f"Failed to add config listener: {e}")
+    def add_config_listener(
+        self,
+        listener: Callable[[dict[str, Any]], Any],
+    ) -> None:
+        with self._cache_lock:
+            self._config_listeners.append(listener)
 
-    def add_config_listener(self, listener: Callable[[dict[str, Any]], None]) -> None:
-        """注册配置变更监听器"""
-        self._config_listeners.append(listener)
-
-    def _register_service(self) -> None:
-        """注册服务实例到 Nacos"""
-        if not self._client:
+    async def _register_service(self) -> None:
+        if self._naming_service is None:
             return
 
-        try:
-            ip = self.config.ip or self._get_local_ip()
-            port = self.config.port
-
-            metadata = {
-                "version": "0.1.0",
-                "protocol": "http",
-                **self.config.metadata,
-            }
-
-            self._client.add_naming_instance(
+        ip = self.config.ip or self._get_local_ip()
+        metadata = {
+            "version": "0.1.0",
+            "protocol": "http",
+            **{key: str(value) for key, value in self.config.metadata.items()},
+        }
+        await self._naming_service.register_instance(
+            request=RegisterInstanceParam(
                 service_name=self.config.service_name,
+                group_name=self.config.group,
                 ip=ip,
-                port=port,
+                port=self.config.port,
                 cluster_name=self.config.cluster_name,
                 weight=1.0,
                 metadata=metadata,
-                enable=True,
+                enabled=True,
                 healthy=True,
+                ephemeral=True,
             )
+        )
+        self._registered_ip = ip
+        logger.info(
+            "Service registered: %s, %s:%s, cluster=%s",
+            self.config.service_name,
+            ip,
+            self.config.port,
+            self.config.cluster_name,
+        )
 
-            logger.info(
-                f"Service registered: {self.config.service_name}, {ip}:{port}, cluster={self.config.cluster_name}"
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to register service: {e}")
-
-    def _get_local_ip(self) -> str:
-        """获取本机 IP"""
+    @staticmethod
+    def _get_local_ip() -> str:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except Exception:
+            sock.connect(("8.8.8.8", 80))
+            return str(sock.getsockname()[0])
+        except OSError:
             return "127.0.0.1"
+        finally:
+            sock.close()
 
-    def deregister_service(self) -> None:
-        """注销服务实例"""
-        if not self._client or not self.config.enable_service_discovery:
+    async def _deregister_service(self) -> None:
+        if self._naming_service is None or self._registered_ip is None:
             return
 
-        try:
-            ip = self.config.ip or self._get_local_ip()
-            port = self.config.port
-
-            self._client.remove_naming_instance(
+        await self._naming_service.deregister_instance(
+            request=DeregisterInstanceParam(
                 service_name=self.config.service_name,
-                ip=ip,
-                port=port,
+                group_name=self.config.group,
+                ip=self._registered_ip,
+                port=self.config.port,
                 cluster_name=self.config.cluster_name,
+                ephemeral=True,
             )
-
-            logger.info(
-                f"Service deregistered: {self.config.service_name}, {ip}:{port}"
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to deregister service: {e}")
+        )
+        self._registered_ip = None
 
     def get_config(self, key: str, default: Any = None) -> Any:
-        """获取配置项"""
-        return self._config_cache.get(key, default)
+        with self._cache_lock:
+            if key in self._config_cache:
+                return self._config_cache[key]
+
+            value: Any = self._config_cache
+            for part in key.split("."):
+                if not isinstance(value, dict) or part not in value:
+                    return default
+                value = value[part]
+            return value
 
     def get_all_config(self) -> dict[str, Any]:
-        """获取所有配置"""
-        return self._config_cache.copy()
+        with self._cache_lock:
+            return dict(self._config_cache)
 
-    def shutdown(self) -> None:
-        """关闭客户端"""
-        self.deregister_service()
-        if self._client:
+    async def shutdown(self) -> None:
+        if self._naming_service is not None:
             try:
-                self._client.stop()
-                logger.info("Nacos client stopped")
-            except Exception as e:
-                logger.error(f"Error stopping Nacos client: {e}")
+                await self._deregister_service()
+            except Exception:
+                logger.exception("Failed to deregister Nacos service")
+            finally:
+                try:
+                    await self._naming_service.shutdown()
+                except Exception:
+                    logger.exception("Failed to shut down Nacos naming client")
+                self._naming_service = None
+
+        if self._config_service is not None:
+            try:
+                await self._config_service.shutdown()
+            except Exception:
+                logger.exception("Failed to shut down Nacos config client")
+            self._config_service = None

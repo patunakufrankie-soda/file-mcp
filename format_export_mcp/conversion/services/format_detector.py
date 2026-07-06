@@ -182,7 +182,7 @@ class FormatDetector:
             features.has_images = total_images > 0
 
             # Text layer detection
-            features.has_text_layer = total_text_length > 50
+            features.has_text_layer = total_text_length > 0
             features.is_scanned = not features.has_text_layer
 
             # Text coverage ratio (simple heuristic)
